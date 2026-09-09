@@ -1,7 +1,9 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.2, updated 09.09.2026 after reviewing fr8000_sdk_V2.1
-> and the gitee.com/YgqMars/freqchip repository.
+> Project knowledge base. Version 1.3, updated 09.09.2026 after phase 0 results (live UART
+> access to the module confirmed, boot-ROM handshake captured, application-layer frame protocol
+> partially decoded). Previous update (1.2) reviewed fr8000_sdk_V2.1 and the
+> gitee.com/YgqMars/freqchip repository.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
 
@@ -52,6 +54,12 @@ native format.
 | SWD pads | **absent** | visual |
 | BLE MAC | `04:75:79:FB:DD:E7` | nRF Connect |
 | BLE name | `ZOOM75 TIGA` | nRF Connect |
+| Pogo contacts are the bootloader UART | confirmed — module answers with `freqchip` / chip id & MAC over these pins | phase 0 experiment |
+
+> ⚠️ **Wiring:** the pogo labels are printed from the **main board's** point of view, not the
+> module's. Connect straight, not crossed: adapter TX → module `TX` pin, adapter RX → module
+> `RX` pin, GND → GND. The crossed ("TX to RX") wiring does not work at all. Port parameters:
+> 115200 8N1, no flow control. Full detail in `docs/UART_PROTOCOL.md`.
 
 ### 2.2 MCU FR8008HP — vendor specification
 
@@ -100,8 +108,10 @@ Confirmed by FR8000 Specification V1.2.0 (p. 277, IOMux table for port A):
 with mux value `0x4`, **PA0 = UART0_Rx, PA1 = UART0_Tx**. Mux registers:
 `PA0_MUX` / `PA1_MUX`, p. 47.
 
-**Hypothesis, needs verification:** the pogo RX/TX contacts are routed from PA0/PA1
-(not from UART1 on PA2/PA3 with mux `0x5`, and not from the alternative pair PA4/PA5).
+**Confirmed, phase 0:** the pogo RX/TX contacts are routed from PA0/PA1. A CP2102 adapter wired
+directly to the pogo pins (115200 8N1, straight — not crossed, see §2.1) receives the boot-ROM
+`freqchip` banner and chip id/MAC on power-up, which only happens if these are the bootloader
+UART pins. See `docs/UART_PROTOCOL.md` for the capture.
 
 ---
 
@@ -115,6 +125,11 @@ recommended**. The absence of SWD pads on the module is an expected situation, n
 
 On power-up the internal ROM boot program attempts to communicate with the PC utility over UART.
 After the handshake, flash writing becomes available.
+
+**Confirmed experimentally, phase 0:** connecting a CP2102 adapter directly to the pogo pins
+(115200 8N1, straight wiring, see §2.1) and powering the module reproduces this exactly — the
+`freqchip` banner and chip id/MAC print about 2.3 s after power-up, byte-for-byte reproducible
+across power cycles. Full capture and timing in `docs/UART_PROTOCOL.md`.
 
 ### Parameters
 
@@ -187,9 +202,10 @@ Useful commands:
 | `AT+FLASH` | persist settings to flash |
 | `AT+CLR_BOND` / `AT+CLR_INFO` | clear bonds and stored settings |
 
-**Hypothesis, cheap to test:** the module firmware may be built on this same example, and the
-main board may be talking to it either in AT commands or in transparent mode. One line in a
-terminal settles it — see phase 0.
+**Rejected, phase 0:** tested directly against the pogo lines — `AT+CIVER?` and other AT commands
+get no response. The module's application firmware is not built on this AT/transparent-mode
+example; it speaks its own binary framed protocol instead (`A5`-prefixed frames with a checksum),
+captured and partially decoded in `docs/UART_PROTOCOL.md`.
 
 Worth noting separately: `AT+MODE=U` puts the module **into upgrade mode**. If it answers AT at
 all, that is another entry point into flashing, in addition to the boot ROM.
@@ -301,48 +317,74 @@ on downgrade and re-flashing the same version.
 | **TIGA** | `RA0167CS` (from silkscreen) | ? | no file in public access |
 
 > No factory firmware for the TIGA exists publicly — the Meletrix archive contains only the
-> 2023 Zoom75 and Zoom98. **But it can be read from the module** with `OTA_CMD_READ_DATA`
-> over BLE — see phase 0.5. This eliminates the main project risk.
+> 2023 Zoom75 and Zoom98. `OTA_CMD_READ_DATA` over BLE is the SDK-documented way to read it back,
+> but **it is not yet confirmed that the factory build actually implements this opcode** — the
+> flashing utility only ever writes, never reads, so nobody has exercised this path on this
+> module. See phase 0.5 for the planned check and both possible outcomes.
 
 ---
 
 ## 5. What needs to be done — stage plan
 
-### Phase 0. Access confirmation (blocking)
+### Phase 0. Access confirmation (blocking) — ✅ done, 09.09.2026
 
-- [ ] Buy a **3.3 V** USB-UART adapter, CP2102 or CH343 (cheap CH340 may not sustain 921600 —
-      explicitly warned in FreqChip documentation)
-- [ ] Connect: GND↔GND, adapter TX → module RX, adapter RX ← module TX (cross)
-- [ ] Terminal at **115200**, apply power to the module
-- [ ] **Success criterion: the string `freqchip` appears in the port**
-- [ ] Separately, try `AT+CIVER?` terminated with CR LF at 115200 — a reply of the form `+VER:...OK` means the
-      module firmware is built on the AT / transparent-mode example, and the protocol it speaks
-      to the main board is most likely textual too
-- [ ] If not — try 9600 / 57600 / 921600, then check with a logic analyser
-- [ ] If still no — pogo contacts are not PA0/PA1; soldering to QFN-40 pins is required
+- [x] Buy a **3.3 V** USB-UART adapter — used a CP2102
+- [x] Connect: GND↔GND, adapter TX → module `TX` pin, adapter RX → module `RX` pin
+      (**straight, not crossed** — see wiring warning in §2.1; the crossed variant does not work)
+- [x] Terminal at **115200 8N1**, no flow control, apply power to the module
+- [x] **Success criterion met: `freqchip` appears in the port**, ~2.3 s after power-up, followed
+      by chip id and MAC (reversed byte order, matches the known `04:75:79:FB:DD:E7`)
+- [x] Tried `AT+CIVER?` and other AT commands — **no response**. Module does not speak the AT
+      example; it runs its own binary framed protocol, captured passively and partially decoded
+      in `docs/UART_PROTOCOL.md`
+- [x] Pogo contacts confirmed as PA0/PA1 (bootloader UART) — no soldering to QFN-40 needed
 
-### Phase 0.5. Dump factory firmware over BLE — do this FIRST
+**Result: the module can be flashed over UART through the pogo pins alone.** No soldering to the
+QFN-40 package is required for stage 1 firmware development. This is the key unblock for the
+whole stage.
 
-The module responds to the stock OTA profile, requires no pairing, and the command set includes
-reading. So the factory firmware can be captured **without a soldering iron, without opening
-anything, with no hardware at all** — just BLE from a computer.
+### Phase 0.5. Check whether a factory firmware backup is even possible — do this FIRST
 
-- [ ] Python + `bleak`, connect to `04:75:79:FB:DD:E7`
+**This is a verification, not a guaranteed backup.** The FreqChip flashing utility only ever
+*writes* (§3 — "the utility writes but does not read"), so the only known path to a dump is the
+SDK's documented `OTA_CMD_READ_DATA` (`0x06`) over the BLE OTA service (§4.2, §4.3). Whether the
+**factory build actually implements this opcode** is unknown — nobody has exercised the read path
+on this module. Treat phase 0.5 as answering that question before assuming a safety net exists.
+
+**Step 1 — safe probes only (no flash access, no risk):**
+
+- [ ] Python + `bleak`, connect to `04:75:79:FB:DD:E7` (no pairing required, §4.2)
 - [ ] Enable notify on `...ff02`
-- [ ] Read `...ff03` (version) and send `02 00 00` → compare with response
-- [ ] Send `01 00 00` (`GET_STR_BASE`) → get bank base address
-- [ ] Negotiate a higher MTU (`gap_set_mtu` on the module side up to 512; request maximum
-      on the host side)
-- [ ] Loop read: opcode `0x06`, payload `base_address(4, LE) + length(2, LE)`
-- [ ] Account for: if the response is larger than `OTAS_NOTIFY_DATA_SIZE`, data is retrieved
-      via GATT Read, not delivered as a notification
-- [ ] Save the dump, compute hash, place in `docs/factory_dump/`
-- [ ] Also read `0x60000` (MAC) and `0x61000` (SN) — verify MAC against the known value
+- [ ] Send `02 00 00` (`OTA_CMD_READ_FW_VER`) → expect a firmware version in the response
+- [ ] Send `01 00 00` (`OTA_CMD_GET_STR_BASE`) → expect a bank base address
+- [ ] If either command returns `0x02` (unknown command) or nothing at all: the factory build
+      likely does not expose this handler — stop here and treat backup as **not available**
+      (see "Outcome B" below)
 
-**Success criterion: a binary image of the factory firmware is on disk.** After this, any
-experiment is reversible and you can work more boldly.
+**Step 2 — only if step 1 succeeds — trial read of a small fragment:**
 
-> ⚠️ Do not send `0x04` (`CHIP_ERASE`) under any circumstances before the dump is obtained.
+- [ ] Negotiate a higher MTU if available (`gap_set_mtu`, up to 512)
+- [ ] Send opcode `0x06` (`OTA_CMD_READ_DATA`) for a small range (e.g. 64–256 bytes) at the base
+      address from step 1
+- [ ] Confirm the returned bytes look like code/data, not garbage or an error result byte
+- [ ] Account for: if the response is larger than `OTAS_NOTIFY_DATA_SIZE`, it is retrieved via a
+      GATT Read on the characteristic, not delivered as a notification
+
+**Outcome A — read works:** proceed to read the full image in a loop, save the dump, compute a
+hash, place it in `docs/factory_dump/`; also read `0x60000` (MAC) and `0x61000` (SN) and verify
+the MAC against the known value. **Success criterion: a binary image of the factory firmware is
+on disk.** After this, later experiments (custom firmware, reflashing) are reversible.
+
+**Outcome B — read does not work (opcode unsupported or errors out on this build):**
+**there will be no factory firmware backup.** The decision to reflash the module with custom
+firmware then has to be made without a rollback path — accept that stock functionality
+(PocketWuque, factory OTA) is lost for good the moment the module is reflashed, or hold off on
+stage 1 until/unless a factory `.bin` surfaces some other way (Meletrix support request, a leak,
+etc.). This is a real possible outcome, not a formality — do not assume Outcome A without running
+step 1.
+
+> ⚠️ Do not send `0x04` (`CHIP_ERASE`) under any circumstances before this check is resolved,
+> per project hardware safety rules.
 
 ### Phase 1. Capture the factory UART protocol (do BEFORE reflashing)
 
@@ -399,10 +441,10 @@ an open-source "knob with LVGL display" demo project on this exact chip family.
 
 | Risk | Probability | Consequence | Mitigation |
 |---|---|---|---|
-| ~~No rollback to stock~~ | Eliminated | — | Firmware can be read back with `READ_DATA` over BLE (phase 0.5) |
-| Dump capture fails | Low | Previous risk returns | Request stock firmware from Meletrix before any writes |
+| No rollback to stock | **Unconfirmed** | Reflashing becomes a one-way trip; stock functionality (PocketWuque, factory OTA) is lost permanently | Pending phase 0.5 read check — `OTA_CMD_READ_DATA` is documented in the SDK but not yet confirmed to work on this build |
+| Dump capture fails (factory build doesn't implement `READ_DATA`) | Medium | Above risk stays open | Request stock firmware from Meletrix before any writes; hold off on reflashing without a dump |
 | MAC/SN lost on full erase | Medium | Module loses identity | MAC recorded: `04:75:79:FB:DD:E7`; do not use full erase without reason |
-| Pogo contacts are not PA0/PA1 | Medium | Soldering to QFN-40 required | Check in phase 0 |
+| ~~Pogo contacts are not PA0/PA1~~ | Resolved | — | Confirmed PA0/PA1 in phase 0 — boot-ROM handshake works directly on the pogo pins |
 | Panel bonded COG / FPC non-detachable | Low | Cannot reuse panel separately | Hirose connector is visible — risk is low |
 | Cheap USB-UART cannot sustain 921600 | Medium | Flashing fails | Use CP2102 / CH343 |
 | Flash is write-protected | Low | Flashing impossible | Utility has a "Flash protection" menu entry |
@@ -499,15 +541,23 @@ The graphics stack is already built and configured by the vendor — no need to 
 
 ## 8. Open questions
 
-1. Are the pogo RX/TX contacts actually routed from PA0/PA1? → phase 0
+1. ~~Are the pogo RX/TX contacts actually routed from PA0/PA1?~~ → **closed, phase 0:** yes —
+   boot-ROM banner and MAC print directly on the pogo pins
 2. What controller and resolution does the panel have? → phase 3
 3. ~~Is there an SDK for FR8008HP?~~ → **closed:** `fr8000_sdk_V2.1` covers the FR8000 family
-4. Does the FR800x boot handshake mechanism match the one documented for FR801xH? → phase 0
+4. ~~Does the FR800x boot handshake mechanism match the one documented for FR801xH?~~ →
+   **closed, phase 0:** confirmed experimentally — `freqchip` banner, chip id & MAC, same as
+   documented
 5. Is flash protection enabled? → will be revealed on the first `READ_DATA` in phase 0.5
 6. ~~Will Meletrix provide the stock firmware?~~ → **not critical**, dump is captured independently
 7. What is `OTAS_NOTIFY_DATA_SIZE` in the factory build? → determined empirically in phase 0.5
-8. Does the module answer AT commands on the pogo contacts? → phase 0, `AT+CIVER?`
+8. ~~Does the module answer AT commands on the pogo contacts?~~ → **closed, phase 0:** no —
+   `AT+CIVER?` and other AT commands get no response; module uses its own binary framed protocol
+   (see `docs/UART_PROTOCOL.md`)
 9. Was the factory firmware built with serial OTA support? → follows from phase 0
+10. Does the factory build actually implement `OTA_CMD_READ_DATA` (`0x06`)? → phase 0.5, unresolved
+11. What is `msg_id 0x31` (the module's outgoing announce frame), and what other `msg_id` values
+    exist? → phase 1, needs the module talking to the main board
 
 ---
 
