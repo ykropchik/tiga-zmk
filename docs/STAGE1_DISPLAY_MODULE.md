@@ -1,6 +1,7 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.1, updated 09.09.2026 after reviewing fr8000_sdk_V2.1.
+> Project knowledge base. Version 1.2, updated 09.09.2026 after reviewing fr8000_sdk_V2.1
+> and the gitee.com/YgqMars/freqchip repository.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
 
@@ -126,8 +127,15 @@ After the handshake, flash writing becomes available.
 
 ### Utility
 
-`FreqChip_Download_New.zip` (FREQCHIP调试工具 V1.3.8) —
-in the archive `https://gitee.com/YgqMars/freqchip/repository/archive/master.zip`
+`FreqChip_Download_New.zip` — at the root of `https://gitee.com/YgqMars/freqchip`.
+Current version is **V1.3.9.1** (2025-03-18), newer than the V1.3.8 described in the guide.
+
+Archive contents: `FreqChip_Download.exe` (GUI), **`FreqChip_Download_Consle.exe`** (console
+build — suitable for scripting and automation), `FrDownloadSdk.dll` v1.4.5, `setting.ini`.
+
+`setting.ini` confirms the MAC address location in flash (`MAC_FLASH=0x60000`) and exposes the
+configuration keys: `Chip_Type`, `Flash_Select`, `uart_port`, `Baud_Rate`, `Auto_Burn`,
+`Auto_Reset`, `MAC_BASE`.
 
 > ⚠️ **The SDK V2.1 does NOT include a flashing utility.** The `tools/` folder contains only
 > `FR8000.FLM` (flash algorithm for Keil/J-Flash) and `JLinkDevices.xml`. Download the
@@ -139,6 +147,52 @@ The "Options" menu has entries for writing MAC, SN, specifying a file, erasing t
 and flash protection.
 
 > ⚠️ The utility writes but **does not read**. It cannot dump the factory firmware.
+
+### 3.1 Serial OTA — a second, gentler write path
+
+Besides flashing through the boot ROM (a full flash rewrite), the FR8000 has a **stock OTA over
+UART**, documented separately in `FR800x/FR8000-串口-ota_V1/升级协议文档.pdf`.
+
+The key statement in that document: the upgrade procedure is **identical across UART, USB and
+other channels** — the same opcode set we found over BLE, only the transport differs.
+
+Shipped alongside it: `fr8000-master-0.4.10.7z` (an SDK variant with serial OTA support) and
+`串口OTA工具（上位机）.7z` (the PC-side utility).
+
+**Practical implication:** if the factory firmware was built with serial OTA (and we already know
+it was built with BLE OTA), the module can also be written over the wire using the same protocol,
+without touching the boot ROM and without risking the bootloader.
+
+### 3.2 AT commands and transparent mode
+
+`FR800x/FR8000串口透传指令与使用说明.pdf` documents the SDK's stock AT interface.
+
+Default port parameters: **115200, 8N1, no parity**.
+Format: `AT+<CMD>[op][params]<CR><LF>`; response `<CR><LF>+<RSP>[params]<CR><LF>`, where RSP is
+`OK` or `ERR`.
+
+Useful commands:
+
+| Command | Action |
+|---|---|
+| `AT+CIVER?` | software version — **the safest probe** |
+| `AT+NAME?` / `AT+NAME=` | device name (1–17 bytes) |
+| `AT+MAC?` / `AT+MAC=` | MAC address |
+| `AT+MODE?` / `AT+MODE=` | mode: `I` idle, `M` link, `B` advertising, **`U` upgrade**, `X` error |
+| `AT+UART?` / `AT+UART=` | port parameters |
+| `AT+LINK?` | connection state |
+| `AT+SLEEP=S/E` | enter / stop sleep |
+| `AT+Z` | reboot |
+| `+++` | enter transparent mode |
+| `AT+FLASH` | persist settings to flash |
+| `AT+CLR_BOND` / `AT+CLR_INFO` | clear bonds and stored settings |
+
+**Hypothesis, cheap to test:** the module firmware may be built on this same example, and the
+main board may be talking to it either in AT commands or in transparent mode. One line in a
+terminal settles it — see phase 0.
+
+Worth noting separately: `AT+MODE=U` puts the module **into upgrade mode**. If it answers AT at
+all, that is another entry point into flashing, in addition to the boot ROM.
 
 ---
 
@@ -203,6 +257,27 @@ Response (on `ff02`): `Result(1) | Opcode(1) | Length(2, LE) | Payload`
 
 Result codes: `0x00` success, `0x01` error, `0x02` unknown command.
 
+#### Clarifications from `升级协议文档.pdf` (FR8000; applies to both BLE and UART)
+
+**A/B ping-pong banking.** Bank A starts at address `0`, bank B starts at `image_size`.
+`image_size` is set by the device firmware with headroom: if the code occupies 90 KB, one might
+declare 100 KB, putting bank B in the 100–200 KB range. Command `0x01` returns the address of the
+bank **the new firmware should be written to** — either `0` or `image_size`.
+
+**Erase (`0x03`) works in 4 KB units.** Loop from the returned base address, `+0x1000` each time,
+until enough space for the whole bin has been erased.
+
+**Write (`0x05`)**: `base_addr(4) | packet_len(2) | data`. The header length field equals
+`packet_len + 6`. Packet size is chosen by the host. The address advances by `packet_len` each
+iteration. Response: `base_addr(4) | len(2)`, header length field `0x0006`.
+
+**Reboot (`0x09`)**: payload = `bin_length(4) | CRC(4)`, header length field `0x0008`.
+⚠️ **The CRC is computed over the file WITHOUT its first 256 header bytes.** The device verifies
+the CRC first and only then reboots. This — not MD5 — is the correct variant for the FR8000.
+
+Observed length-field values: `0x0004` for commands with a 4-byte payload, `0x0008` for reboot.
+Byte order is little-endian.
+
 Implementation detail (`ota.c`): if a read response does not fit into `OTAS_NOTIFY_DATA_SIZE`,
 the module does not send it as a notification; instead it saves the request and waits for the
 client to retrieve the data via a **GATT Read** on the characteristic. This must be handled in
@@ -240,6 +315,9 @@ on downgrade and re-flashing the same version.
 - [ ] Connect: GND↔GND, adapter TX → module RX, adapter RX ← module TX (cross)
 - [ ] Terminal at **115200**, apply power to the module
 - [ ] **Success criterion: the string `freqchip` appears in the port**
+- [ ] Separately, try `AT+CIVER?` terminated with CR LF at 115200 — a reply of the form `+VER:...OK` means the
+      module firmware is built on the AT / transparent-mode example, and the protocol it speaks
+      to the main board is most likely textual too
 - [ ] If not — try 9600 / 57600 / 921600, then check with a logic analyser
 - [ ] If still no — pogo contacts are not PA0/PA1; soldering to QFN-40 pins is required
 
@@ -334,6 +412,33 @@ an open-source "knob with LVGL display" demo project on this exact chip family.
 
 ## 7. Resources
 
+### 7.0 Contents of `gitee.com/YgqMars/freqchip` (obtained, reviewed)
+
+Unofficial but unusually substantial. Root:
+
+| File | What it is |
+|---|---|
+| `FreqChip_Download_New.zip` | flashing utility V1.3.9.1, GUI + console |
+| `FREQCHIP_OTA_V1.2.0.zip` | OTA host application |
+| `ARM.CMSIS.5.9.0.pack` | Keil pack |
+| `富芮坤芯片入手资料获取和使用.pdf` | how to obtain vendor material and use the flasher |
+| `FR8000 OTA sleep profile.docx` | OTA combined with sleep |
+| `FR8000_串口DMA不定长接收处理.pdf` | receiving variable-length UART packets via DMA |
+
+`FR800x/` directory:
+
+| File | What it is |
+|---|---|
+| `FR8000-串口-ota_V1/升级协议文档.pdf` | **the complete OTA protocol** (analysed, see 4.3) |
+| `FR8000-串口-ota_V1/fr8000-master-0.4.10.7z` | SDK variant with serial OTA |
+| `FR8000-串口-ota_V1/串口OTA工具（上位机）.7z` | serial OTA PC utility |
+| `FR8000串口透传指令与使用说明.pdf` | **AT commands and transparent mode** (see 3.2) |
+| `FR8000_usb_ota参考（io口复用为usb）.7z` | OTA over USB, IO multiplexing |
+| `FR800系列SDK讲解.pdf` | SDK walkthrough |
+| `FR800x提升RF脚ESD能力_1208.pdf` | ESD protection for RF pins |
+| `fr8000u_sdk1.1_4983bf6_Power.7z` | SDK for the -U series |
+| `过认证/FR800x_HCI_PA0_PA1认证测试V1.0.4.zip` | certification tests — **PA0/PA1 right in the filename**, further confirmation that this is the stock UART pair |
+
 ### 7.1 Contents of `fr8000_sdk_V2.1` (obtained, reviewed)
 
 ```
@@ -401,6 +506,8 @@ The graphics stack is already built and configured by the vendor — no need to 
 5. Is flash protection enabled? → will be revealed on the first `READ_DATA` in phase 0.5
 6. ~~Will Meletrix provide the stock firmware?~~ → **not critical**, dump is captured independently
 7. What is `OTAS_NOTIFY_DATA_SIZE` in the factory build? → determined empirically in phase 0.5
+8. Does the module answer AT commands on the pogo contacts? → phase 0, `AT+CIVER?`
+9. Was the factory firmware built with serial OTA support? → follows from phase 0
 
 ---
 
@@ -422,8 +529,11 @@ The graphics stack is already built and configured by the vendor — no need to 
 
 ### Flashing and toolchain
 
-- [gitee.com/YgqMars/freqchip](https://gitee.com/YgqMars/freqchip) — `FreqChip_Download_New`,
-  the serial flashing utility. **Not shipped with SDK V2.1**, must be fetched here
+- [gitee.com/YgqMars/freqchip](https://gitee.com/YgqMars/freqchip) — the richest single source.
+  `FreqChip_Download_New` V1.3.9.1 (GUI + console), the full OTA protocol document, the serial
+  OTA SDK variant and its PC utility, the AT command reference, USB OTA reference, RF ESD
+  guidance. **The flashing utility is not shipped with SDK V2.1**, so it must be fetched here.
+  Full breakdown in section 7.0
 - [gitee.com/a18562560220/freqchip_faq](https://gitee.com/a18562560220/freqchip_faq) —
   unofficial mirror maintained by a forum moderator: `06富芮坤芯片入手资料获取和烧录工具使用.pdf`,
   `Freqchip芯片烧录与环境搭建.pdf`, peripheral driver examples, and `lvgl_knob_open_demo` —

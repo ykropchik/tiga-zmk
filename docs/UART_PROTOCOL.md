@@ -11,6 +11,12 @@ Status: **not captured yet**. To be filled in during stage 1, phase 1.
 | Baud rate | ? | not determined |
 | Frame format | ? | not determined |
 
+## Leading hypothesis
+
+The module may speak the FreqChip SDK's stock **AT command set** (115200 8N1) or its transparent
+passthrough mode — see `STAGE1_DISPLAY_MODULE.md` §3.2. Test this before reaching for a logic
+analyser: send `AT+CIVER?` terminated with CR LF at 115200 and look for a `+VER:...OK` reply.
+
 ## Capture method
 
 1. Module installed in the keyboard; solder onto the main board TX line — listen only.
