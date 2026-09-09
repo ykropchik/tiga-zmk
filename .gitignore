@@ -1,0 +1,37 @@
+.idea/
+
+# сборка
+build/
+Objects/
+Listings/
+*.axf
+*.o
+*.d
+*.crf
+*.lnp
+*.htm
+*.dep
+*.bak
+*.uvguix.*
+
+# KiCad
+*-backups/
+fp-info-cache
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*.net
+
+# SDK и вендорские архивы — не коммитим, качаются отдельно
+vendor/
+*.zip
+*.rar
+*.exe
+
+# python
+__pycache__/
+.venv/
+*.pyc
+
+# ОС
+.DS_Store
+Thumbs.db
