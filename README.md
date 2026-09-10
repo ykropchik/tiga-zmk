@@ -19,7 +19,7 @@ can be modified.
 
 | Stage | What | Status |
 |---|---|---|
-| **1** | Custom display module firmware (FreqChip FR8008HP) | planning |
+| **1** | Custom display module firmware (FreqChip FR8008HP) | phases 0 and 0.5 done |
 | **2** | Custom PCB for the TIGA case on nRF52840 + ZMK | not started |
 
 The stages are independent: the display module is a separate device, developed on the bench,
@@ -49,6 +49,10 @@ dumping the factory module firmware over BLE. Do this before any flash writes.
   16 MB flash, 2 MB PSRAM), 24 MHz crystal, 13-pin FPC panel (Hirose connector),
   keyboard interface — UART on 4 pogo pins (`GND / RX / TX / VCC`).
 - Module BLE: `ZOOM75 TIGA`, MAC `04:75:79:FB:DD:E7`, **no pairing required**.
+- Panel: **320 × 172, RGB565, landscape**, driven in software over SPI (SSIM0). Likely ST7789.
+- Flash: firmware banks A/B at `0x0` and `0x32000`; `HPLX` resource chain at `0x80000`
+  (608 containers, ~8.7 MB); ~6 MB free above `0x929940`.
+- Factory firmware **dumped over BLE**, both banks, byte-identical. Rollback is possible.
 - Main keyboard board: **ArteryTek AT32F415** (LQFP64), 16 MHz crystal, external
   SPI flash, radio on a separate module with a PCB antenna on the main board.
 

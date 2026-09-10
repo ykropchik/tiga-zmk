@@ -1,8 +1,8 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.3, updated 09.09.2026 after phase 0 results (live UART
-> access to the module confirmed, boot-ROM handshake captured, application-layer frame protocol
-> partially decoded). Previous update (1.2) reviewed fr8000_sdk_V2.1 and the
+> Project knowledge base. Version 1.4, updated 10.09.2026 after phase 0.5 (factory firmware
+> dumped over BLE) and the resource-format work that settled the panel resolution. Previous
+> update (1.3) recorded phase 0 results; 1.2 reviewed fr8000_sdk_V2.1 and the
 > gitee.com/YgqMars/freqchip repository.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
@@ -55,6 +55,8 @@ native format.
 | BLE MAC | `04:75:79:FB:DD:E7` | nRF Connect |
 | BLE name | `ZOOM75 TIGA` | nRF Connect |
 | Pogo contacts are the bootloader UART | confirmed — module answers with `freqchip` / chip id & MAC over these pins | phase 0 experiment |
+| Panel resolution | **320 × 172, RGB565, landscape** | resource catalogue, §4.5 |
+| Panel interface | SPI via SSIM0 (`0x50030000` / `0x50030060`) | 4-byte-aligned literals in firmware |
 
 > ⚠️ **Wiring:** the pogo labels are printed from the **main board's** point of view, not the
 > module's. Connect straight, not crossed: adapter TX → module `TX` pin, adapter RX → module
@@ -324,6 +326,83 @@ on downgrade and re-flashing the same version.
 
 ---
 
+### 4.5 Resource format — `HPLX` containers
+
+Images and animations live in flash **above the firmware banks**, in a chain of containers that
+starts at `0x80000` and ends at `0x929940` — **608 containers, ~8.7 MB**.
+
+Container layout:
+
+```
++0x00  "HPLX"                    magic
++0x08  width         uint32 LE
++0x0C  height        uint32 LE
++0x20  table_offset  = 0x28              relative to container start
++0x24  data_offset   = 0x28 + height*8   relative to container start
+```
+
+The row table holds `height` entries of `(row_offset, row_size)`, uint32 LE, relative to
+`data_offset`. **Each row is a list of spans**, not a raw scanline:
+
+```
+<x_start : uint32 LE> <byte_len : uint32 LE> <byte_len bytes of RGB565 pixels>
+```
+
+A full row is a single span with `x_start = 0` and `byte_len = width*2`. Delta frames store only
+the spans that changed, so **a frame cannot be decoded in isolation** — composite it onto the
+previous frame, exactly like video. The first frames of each animation run are full; the rest
+are deltas.
+
+Practical notes, all learned the hard way:
+
+- Container sizes are **variable**. Compute the end from the row table (`data_offset +
+  max(row_offset + row_size)`), never from `width × height`.
+- Containers are padded with `0xFF` up to a 4-byte boundary, and the last row's `size` field
+  sometimes under-reports its final span. Verify the `HPLX` magic at the computed next address
+  and resync forward if it is missing.
+- Pixels are RGB565 little-endian, row-major. No palette, no entropy coding.
+
+Catalogue of the 608 containers (152 runs of consecutive same-size entries). Notable groups:
+
+| Size | Count | What it is |
+|---|---|---|
+| 320 × 172 | 88 | **full-screen frames** — four separate runs, one of 85 frames |
+| 120 × 146 | 41 | large widget animation |
+| 320 × 80 | 31 | Meletrix boot logo with a travelling highlight |
+| 44 × 38 | 28 | icons |
+| 154 × 120 | 26 | cat animation |
+| 170 × 160 | 26 | widget animation |
+| 106 × 50 | 20 | panel strips |
+| 46 × 46 | 18 | icons |
+| 320 × 98, 260 × 60, 238 × 50, 232 × 74 | few each | banners and strips |
+| 10 × 15, 12 × 20, 16 × 26, 8 × 16, 32 × 16 … | groups of 10–16 | **glyph sets — digits 0–9 in several point sizes** |
+
+Runs of exactly ten small same-sized containers are almost certainly digit sets; several
+distinct heights mean several font sizes for different screens.
+
+**Consequence for custom firmware:** the format is trivial to both read and write. Encoding an
+image into `HPLX` is a few dozen lines of Python, so a custom firmware can either reuse the
+existing container chain as-is or replace it entirely.
+
+Tooling: `tools/hplx_grab.py` walks the chain and downloads every container, resumably.
+
+### 4.6 Flash map (16 MB, probed at 64 KB steps)
+
+| Range | Contents |
+|---|---|
+| `0x000000` – `0x032000` | firmware bank A (code ends at `0x25988`, ~154 KB) |
+| `0x032000` – `0x064000` | firmware bank B, identical image |
+| `0x064000` – `0x080000` | erased gap |
+| `0x080000` – `0x929940` | **`HPLX` resource chain, 608 containers, ~8.7 MB** |
+| `0x929940` – `0xFFFFFF` | erased, ~6 MB free |
+
+Only **one** firmware header (magic `33333333` at `+0x08`) exists in the whole flash — there is
+no second application. All rendering happens inside the ~154 KB image that was dumped.
+
+Tooling: `tools/ota_scan.py` produces this map.
+
+---
+
 ## 5. What needs to be done — stage plan
 
 ### Phase 0. Access confirmation (blocking) — ✅ done, 09.09.2026
@@ -343,48 +422,51 @@ on downgrade and re-flashing the same version.
 QFN-40 package is required for stage 1 firmware development. This is the key unblock for the
 whole stage.
 
-### Phase 0.5. Check whether a factory firmware backup is even possible — do this FIRST
+### Phase 0.5. Factory firmware backup — ✅ DONE, 10.09.2026 (Outcome A)
 
-**This is a verification, not a guaranteed backup.** The FreqChip flashing utility only ever
-*writes* (§3 — "the utility writes but does not read"), so the only known path to a dump is the
-SDK's documented `OTA_CMD_READ_DATA` (`0x06`) over the BLE OTA service (§4.2, §4.3). Whether the
-**factory build actually implements this opcode** is unknown — nobody has exercised the read path
-on this module. Treat phase 0.5 as answering that question before assuming a safety net exists.
+**Result: `OTA_CMD_READ_DATA` is implemented in the factory build. Both banks are dumped.
+The "no rollback" risk is eliminated.**
 
-**Step 1 — safe probes only (no flash access, no risk):**
+Probe responses:
 
-- [ ] Python + `bleak`, connect to `04:75:79:FB:DD:E7` (no pairing required, §4.2)
-- [ ] Enable notify on `...ff02`
-- [ ] Send `02 00 00` (`OTA_CMD_READ_FW_VER`) → expect a firmware version in the response
-- [ ] Send `01 00 00` (`OTA_CMD_GET_STR_BASE`) → expect a bank base address
-- [ ] If either command returns `0x02` (unknown command) or nothing at all: the factory build
-      likely does not expose this handler — stop here and treat backup as **not available**
-      (see "Outcome B" below)
+| Command | Response payload | Meaning |
+|---|---|---|
+| `02 00 00` `READ_FW_VER` | `01 00 00 00` | firmware version = **1** |
+| `00 00 00` `NVDS_TYPE` | `11` | `0x11` — not a value in the SDK enum, see open questions |
+| `01 00 00 00` `GET_STR_BASE` | `00 20 03 00` | storage base = **`0x00032000`** |
 
-**Step 2 — only if step 1 succeeds — trial read of a small fragment:**
+Two implementation details that cost time and are easy to hit again:
 
-- [ ] Negotiate a higher MTU if available (`gap_set_mtu`, up to 512)
-- [ ] Send opcode `0x06` (`OTA_CMD_READ_DATA`) for a small range (e.g. 64–256 bytes) at the base
-      address from step 1
-- [ ] Confirm the returned bytes look like code/data, not garbage or an error result byte
-- [ ] Account for: if the response is larger than `OTAS_NOTIFY_DATA_SIZE`, it is retrieved via a
-      GATT Read on the characteristic, not delivered as a notification
+**The `READ_DATA` notification is only an acknowledgement.** It echoes back `base_addr` and
+`length` with result `0x00`. The payload itself must be fetched with a plain **GATT Read on
+`...ff00`** afterwards. Waiting for the data to arrive as a notification will time out forever.
 
-**Outcome A — read works:** proceed to read the full image in a loop, save the dump, compute a
-hash, place it in `docs/factory_dump/`; also read `0x60000` (MAC) and `0x61000` (SN) and verify
-the MAC against the known value. **Success criterion: a binary image of the factory firmware is
-on disk.** After this, later experiments (custom firmware, reflashing) are reversible.
+**The module rejects reads below roughly 32 bytes.** An 8-byte request fails outright. Always
+request at least 32 bytes and trim the result.
 
-**Outcome B — read does not work (opcode unsupported or errors out on this build):**
-**there will be no factory firmware backup.** The decision to reflash the module with custom
-firmware then has to be made without a rollback path — accept that stock functionality
-(PocketWuque, factory OTA) is lost for good the moment the module is reflashed, or hold off on
-stage 1 until/unless a factory `.bin` surfaces some other way (Meletrix support request, a leak,
-etc.). This is a real possible outcome, not a formality — do not assume Outcome A without running
-step 1.
+Dumps taken:
 
-> ⚠️ Do not send `0x04` (`CHIP_ERASE`) under any circumstances before this check is resolved,
-> per project hardware safety rules.
+| Bank | Address | Size | sha256 (short) |
+|---|---|---|---|
+| A | `0x00000` | 204 800 | `328439b6b26bd3f2` |
+| B | `0x32000` | 204 800 | `2bdd6ed5dfa04173` |
+
+Both banks hold **the same firmware**. The only difference is the gap between the header and the
+code (`0x64`–`0x2000`): `0xFF` in bank A, zeros in bank B. Bank A was written on the production
+line via the UART utility, which skips blank pages; bank B was written via OTA, which stores the
+file verbatim. Version is 1 in both, so the unit was never updated by a user and no older image
+exists for comparison.
+
+Two independent reads of the same firmware from different flash regions agreeing byte for byte
+is the strongest available validation that the read path is correct.
+
+> ⚠️ `0x60000` — the MAC location per the flashing utility's `setting.ini` — reads back as all
+> `0xFF`. **The MAC is not stored there in this build.** It presumably lives in eFuse or NVDS.
+> Since its real location is unknown, a chip erase may be unrecoverable. Do not use `0x04`
+> (`CHIP_ERASE`), and do not touch the utility's "Flash Protect" menu entry — it is a toggle
+> that *sets* protection, not an indicator that reports it.
+
+Tooling used: `tools/ota_probe.py` (safe probes), `tools/ota_dump.py` (range dump).
 
 ### Phase 1. Capture the factory UART protocol (do BEFORE reflashing)
 
@@ -412,16 +494,45 @@ be reused in stage 2; second, it is insurance — if the custom firmware fails, 
 - [ ] `FreqChip_Download_New` from `gitee.com/YgqMars/freqchip`
 - [ ] Build the `ble_simple_peripheral` example unchanged and flash it — verify the toolchain
 
-### Phase 3. Panel identification
+### Phase 3. Panel identification — partially done
 
-- [ ] Close-up photo of the FPC cable marking, find datasheet
-- [ ] Identify the controller (expected: ST7789 / GC9A01 / ILI9341 or similar)
-- [ ] Determine resolution, interface (SPI / D-SPI / QSPI / I8080), 13-pin pinout
-- [ ] Probe which FR8008HP pins connect to the Hirose connector
+**Resolution established: 320 × 172, RGB565, landscape.**
 
-Resolution reference from neighbours: Zoom75 (2023) — same class screen; YUNZII AL80
-panel is 96×160 RGB565 big-endian row-major, 30 720 bytes per frame. The TIGA is claimed to
-have twice the memory and "4× faster interface" — resolution is likely higher.
+Derived from the complete resource catalogue (§4.5): 608 containers were enumerated, the maximum
+width across all of them is exactly 320 and the maximum height exactly 172, and **88 containers
+measure precisely 320 × 172**, including one 85-frame full-screen animation. Nothing exceeds
+those bounds.
+
+That matches a widely sold **1.47" 172×320 IPS module with an ST7789 controller**, used in
+landscape. Active area is about 28 × 15 mm, which suits the 2U module bay.
+
+> A correction worth keeping: earlier in this project the panel was assumed to be 320 × 80,
+> inferred from the dimensions of the first asset examined — the boot logo. That inference was
+> wrong. Asset dimensions describe the asset, not the panel. The observation that the boot
+> animation does not fill the screen was the correct signal.
+
+Interface: **SPI via SSIM0**. Three 4-byte-aligned literal references to `0x50030000` and
+`0x50030060` appear in both the TIGA dump and the vendor Zoom75 image. The hardware LCD
+controller at `0x500D0000` is referenced **nowhere** in either firmware, so the panel is driven
+in software over SPI rather than by the chip's display block.
+
+> Two method notes, both from mistakes made here. Scanning firmware for peripheral base
+> addresses must use **4-byte alignment** — a 2-byte stride produces false positives inside
+> instruction encodings, and one such false hit was disassembled and turned out to be BLE stack
+> code. And the **absence of `lv_` / `st77` debug strings proves nothing**: the vendor's
+> known-working Zoom75 image contains none either, yet it certainly drives a panel.
+
+Still open:
+
+- [ ] Confirm the controller is ST7789 — capture the init sequence with a logic analyser on the
+      FPC, or locate the SSIM0 init routine in the disassembly
+- [ ] Map the 13-pin FPC pinout
+- [ ] Probe which FR8008HP pins reach the Hirose connector
+- [ ] Cross-check by measuring the active area with callipers (~28 × 15 mm expected)
+
+The FPC carries no display markings, so the datasheet route is closed. The logic analyser is the
+shortest path: commands `0x2A` / `0x2B` in the init stream carry the window bounds, which is the
+resolution stated outright.
 
 ### Phase 4. Custom firmware
 
@@ -441,13 +552,14 @@ an open-source "knob with LVGL display" demo project on this exact chip family.
 
 | Risk | Probability | Consequence | Mitigation |
 |---|---|---|---|
-| No rollback to stock | **Unconfirmed** | Reflashing becomes a one-way trip; stock functionality (PocketWuque, factory OTA) is lost permanently | Pending phase 0.5 read check — `OTA_CMD_READ_DATA` is documented in the SDK but not yet confirmed to work on this build |
-| Dump capture fails (factory build doesn't implement `READ_DATA`) | Medium | Above risk stays open | Request stock firmware from Meletrix before any writes; hold off on reflashing without a dump |
-| MAC/SN lost on full erase | Medium | Module loses identity | MAC recorded: `04:75:79:FB:DD:E7`; do not use full erase without reason |
+| ~~No rollback to stock~~ | **Eliminated** | — | Both banks dumped over BLE in phase 0.5; images in `docs/factory_dump/` |
+| ~~Dump capture fails~~ | **Eliminated** | — | `READ_DATA` is implemented in the factory build |
+| MAC not recoverable after a chip erase | **High** | Module permanently loses its identity | MAC is **not** at `0x60000` (reads `0xFF`) — real location unknown. Never use `CHIP_ERASE`. Known value for reference: `04:75:79:FB:DD:E7` |
 | ~~Pogo contacts are not PA0/PA1~~ | Resolved | — | Confirmed PA0/PA1 in phase 0 — boot-ROM handshake works directly on the pogo pins |
 | Panel bonded COG / FPC non-detachable | Low | Cannot reuse panel separately | Hirose connector is visible — risk is low |
 | Cheap USB-UART cannot sustain 921600 | Medium | Flashing fails | Use CP2102 / CH343 |
-| Flash is write-protected | Low | Flashing impossible | Utility has a "Flash protection" menu entry |
+| ~~Flash is read-protected~~ | **Eliminated** | — | `READ_DATA` returns real code and data |
+| Flash is write-protected | Low | Flashing impossible | Unknown until the first write. **Do not touch the utility's "Flash Protect" entry** — it is a toggle that *sets* protection, not an indicator |
 | Loss of PocketWuque | 100% | No image upload from phone | Conscious decision; custom channel in phase 4 |
 
 ---
@@ -543,21 +655,29 @@ The graphics stack is already built and configured by the vendor — no need to 
 
 1. ~~Are the pogo RX/TX contacts actually routed from PA0/PA1?~~ → **closed, phase 0:** yes —
    boot-ROM banner and MAC print directly on the pogo pins
-2. What controller and resolution does the panel have? → phase 3
+2. ~~What resolution does the panel have?~~ → **closed: 320 × 172 RGB565 landscape**, from the
+   608-container resource catalogue (§4.5). Controller still to be confirmed — ST7789 expected
+   → phase 3
 3. ~~Is there an SDK for FR8008HP?~~ → **closed:** `fr8000_sdk_V2.1` covers the FR8000 family
 4. ~~Does the FR800x boot handshake mechanism match the one documented for FR801xH?~~ →
    **closed, phase 0:** confirmed experimentally — `freqchip` banner, chip id & MAC, same as
    documented
-5. Is flash protection enabled? → will be revealed on the first `READ_DATA` in phase 0.5
+5. ~~Is flash read-protected?~~ → **closed, phase 0.5:** no
 6. ~~Will Meletrix provide the stock firmware?~~ → **not critical**, dump is captured independently
-7. What is `OTAS_NOTIFY_DATA_SIZE` in the factory build? → determined empirically in phase 0.5
+7. ~~What is `OTAS_NOTIFY_DATA_SIZE`?~~ → **partly closed:** `READ_DATA` never returns the
+   payload by notification at all — it always acknowledges and hands the data over via GATT
+   Read on `...ff00`. Separately, reads below ~32 bytes are rejected outright
 8. ~~Does the module answer AT commands on the pogo contacts?~~ → **closed, phase 0:** no —
    `AT+CIVER?` and other AT commands get no response; module uses its own binary framed protocol
    (see `docs/UART_PROTOCOL.md`)
 9. Was the factory firmware built with serial OTA support? → follows from phase 0
-10. Does the factory build actually implement `OTA_CMD_READ_DATA` (`0x06`)? → phase 0.5, unresolved
+10. ~~Does the factory build implement `OTA_CMD_READ_DATA`?~~ → **closed, phase 0.5:** yes
 11. What is `msg_id 0x31` (the module's outgoing announce frame), and what other `msg_id` values
     exist? → phase 1, needs the module talking to the main board
+12. `NVDS_TYPE` returns `0x11`, which is not a value in the SDK enum (`0` none / `1` flash /
+    `2` eeprom). What does it encode, and is the MAC kept there?
+13. Where is the MAC actually stored, given that `0x60000` is erased?
+14. Why does a container's last row sometimes under-report its final span in the row table?
 
 ---
 
