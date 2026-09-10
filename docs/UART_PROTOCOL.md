@@ -1,8 +1,13 @@
 # UART protocol between the main board and the display module
 
-Status: **partially reverse-engineered** (phase 0, 09.09.2026). Physical layer, the boot-ROM
-handshake, and the module's own outgoing attempt are confirmed experimentally. The main board's
-side of the conversation has not been observed yet — that is phase 1.
+Status: **largely reverse-engineered** (10.09.2026). Physical layer and the module's outgoing
+frame were confirmed experimentally in phase 0; the frame format, checksum and the full message
+vocabulary were then recovered by decompiling the firmware in Ghidra. What remains unknown is
+which message ids correspond to which user-visible keyboard actions — that still wants a live
+capture.
+
+Key addresses: parser `0x10021706`, dispatcher `0x10021228`, reply path `0x10020E26`.
+A reconstruction of the parser is in `research/uart_parser_reconstructed.c`.
 
 ## Experimental setup
 
@@ -136,3 +141,80 @@ actually talking to the main board:
 module announcing itself to the main board on boot. Meaning of other `msg_id` values, and the
 main board's replies (including whether it replies at all within the module's window), are
 unknown — pending phase 1 capture with the module installed in the keyboard.
+
+---
+
+## Recovered from the firmware (10.09.2026)
+
+### Frame format, confirmed against the parser
+
+```
+A5 | msg_id | len_hi | len_lo | payload[len] | checksum
+```
+
+- length is **big-endian**, assembled at `0x10021742`
+- payload is capped at `0x43` = 67 bytes; longer frames are dropped and the parser resyncs
+- checksum = `~(msg_id + len_hi + len_lo + Σ payload) & 0xFF`, matching the `0xFF - sum` formula
+  derived from the captured frames
+- **a checksum byte of `0xFF` is accepted without verification** (`0x100217A0`) — useful while
+  experimenting
+- on mismatch the module replies with code `0xFD`
+
+Nearly every handler begins with `cmp payload[0], #0`, so **byte 0 of the payload acts as a
+direction or sub-type flag** and must be zero on the request path. `payload[1]` usually selects a
+variant. All multi-byte numeric fields are big-endian — the dispatcher is full of `rev16`.
+
+### Message vocabulary
+
+| msg_id | Meaning | Confidence |
+|---|---|---|
+| `0x01` | control / reset; variant 1 rewrites a clock register and spins forever | high |
+| `0x02` | **arm a data transfer**: 32-bit address, 32-bit length, 16-bit chunk size | high |
+| `0x03` | **transfer a data block** at the running address, acks `0xFE` | high |
+| `0x04` | **set UART baud rate**; recognises `0x1C200` (115200) and `0xE1000` (921600) | high |
+| `0x31` | the module's own announce/poll frame, with a retry counter | fact (captured) |
+| `0x32` | **set mode**, `payload[1]` ∈ {1,2,3,4} | high |
+| `0x33` | accepted, no visible effect on this path | low |
+| `0x34` | fires two callbacks when `payload[1] == 1` | medium |
+| `0x35` | two 16-bit values plus a byte | medium |
+| `0x36` | accepted, falls through | low |
+| `0x37` | **signed 16-bit measurement ÷10**; `0xFFFF` means "no data" | high |
+| `0x38` | **packs a date/time into one 32-bit word** via `bfi` (year−2000 in bits 26–31) | high |
+| `0x39` | four actions selected by `payload[1]` → codes 5..8 | medium |
+| `0x3A` | 16-bit value, acts only on change, then raises event 7 | medium |
+| `0xFB` | **builds a 10-byte reply** from a global — identity or version report | high |
+| `0xFD` | two 16-bit values plus a byte | medium |
+| `0xFE` | **three signed 16-bit measurements ÷10**, same `0xFFFF` convention | high |
+| `0xFF` | **date and time**: five consecutive 16-bit big-endian fields | high |
+
+Reply codes: `0xFE` accepted, `0xFD` checksum error, `0xFA` transfer not armed, `0xF9` parameter
+out of range.
+
+### The `0x02` / `0x03` transfer sequence
+
+This is how the main board pushes images into the module's flash over the wire.
+
+`0x02` arms the transfer and validates (`0x1002169A`–`0x100216AC`):
+
+- chunk size ≤ `0x400` (1024), else `0xF9`
+- target address ≥ `0x80000` — **the resource area only; the firmware banks are off limits**
+- target address below the length bound, and 4 KB-aligned
+
+`0x03` then pushes blocks, advancing the address and decrementing a counter, replying `0xFE` each
+time and clearing the busy flag when the counter reaches zero. Sending `0x03` without `0x02`
+first returns `0xFA`.
+
+> Consequence for stage 2: a custom ZMK board can reload the module's image library over the
+> wire, with no BLE involved. It cannot touch the firmware itself — that needs BLE OTA or the
+> boot ROM.
+
+### Still unknown
+
+- the payload layout of `0x31` beyond the two-byte retry counter
+- whether `0x33` and `0x36` do anything at all
+- which ids correspond to channel switching, battery level, Caps Lock and page navigation —
+  needs a capture from a live keyboard
+
+The ÷10 signed fields and the date/time messages suggest the module also displays sensor readings
+and a clock, consistent with the vendor app's weather and time features.
+

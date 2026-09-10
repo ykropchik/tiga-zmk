@@ -49,7 +49,9 @@ dumping the factory module firmware over BLE. Do this before any flash writes.
   16 MB flash, 2 MB PSRAM), 24 MHz crystal, 13-pin FPC panel (Hirose connector),
   keyboard interface — UART on 4 pogo pins (`GND / RX / TX / VCC`).
 - Module BLE: `ZOOM75 TIGA`, MAC `04:75:79:FB:DD:E7`, **no pairing required**.
-- Panel: **320 × 172, RGB565, landscape**, driven in software over SPI (SSIM0). Likely ST7789.
+- Panel: **1.47" 172×320 ST7789 in landscape** — visible area 320 × 172 RGB565, **offset by 34
+  rows** (window = columns 0..319, rows 34..205). SPI via SSIM0, chained DMA from two PSRAM
+  framebuffers. RST on PA2, DC on PA4, CS on PA5, SPI on PB0/PB2–PB5.
 - Flash: firmware banks A/B at `0x0` and `0x32000`; `HPLX` resource chain at `0x80000`
   (608 containers, ~8.7 MB); ~6 MB free above `0x929940`.
 - Factory firmware **dumped over BLE**, both banks, byte-identical. Rollback is possible.

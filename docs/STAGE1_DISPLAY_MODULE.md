@@ -1,9 +1,8 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.4, updated 10.09.2026 after phase 0.5 (factory firmware
-> dumped over BLE) and the resource-format work that settled the panel resolution. Previous
-> update (1.3) recorded phase 0 results; 1.2 reviewed fr8000_sdk_V2.1 and the
-> gitee.com/YgqMars/freqchip repository.
+> Project knowledge base. Version 1.5, updated 10.09.2026 after decompiling the display driver
+> and the protocol dispatcher in Ghidra, and reading live RAM from the module over BLE.
+> Phase 3 is closed. Previous updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
 
@@ -466,7 +465,8 @@ is the strongest available validation that the read path is correct.
 > (`CHIP_ERASE`), and do not touch the utility's "Flash Protect" menu entry — it is a toggle
 > that *sets* protection, not an indicator that reports it.
 
-Tooling used: `tools/ota_probe.py` (safe probes), `tools/ota_dump.py` (range dump).
+Tooling used: `tools/ota_probe.py` (safe probes), `tools/ota_dump.py` (flash range dump),
+`tools/ota_readmem.py` (live RAM reads via `READ_MEM` 0x08, and flash with `--flash`).
 
 ### Phase 1. Capture the factory UART protocol (do BEFORE reflashing)
 
@@ -494,45 +494,97 @@ be reused in stage 2; second, it is insurance — if the custom firmware fails, 
 - [ ] `FreqChip_Download_New` from `gitee.com/YgqMars/freqchip`
 - [ ] Build the `ble_simple_peripheral` example unchanged and flash it — verify the toolchain
 
-### Phase 3. Panel identification — partially done
+### Phase 3. Panel identification — ✅ DONE (10.09.2026)
 
-**Resolution established: 320 × 172, RGB565, landscape.**
+Answered entirely by decompilation in Ghidra plus one live RAM read. No logic analyser needed.
 
-Derived from the complete resource catalogue (§4.5): 608 containers were enumerated, the maximum
-width across all of them is exactly 320 and the maximum height exactly 172, and **88 containers
-measure precisely 320 × 172**, including one 85-frame full-screen animation. Nothing exceeds
-those bounds.
+**Controller: ST7789 or fully compatible.** `FUN_10014ed8` emits three commands:
 
-That matches a widely sold **1.47" 172×320 IPS module with an ST7789 controller**, used in
-landscape. Active area is about 28 × 15 mm, which suits the 2U module bay.
+```c
+local_28 = 0x2a0002;   /* 0x2A — Column Address Set */
+local_28 = 0x2b0002;   /* 0x2B — Row Address Set    */
+local_20 = 0x2c0002;   /* 0x2C — Memory Write       */
+```
 
-> A correction worth keeping: earlier in this project the panel was assumed to be 320 × 80,
-> inferred from the dimensions of the first asset examined — the boot logo. That inference was
-> wrong. Asset dimensions describe the asset, not the panel. The observation that the boot
-> animation does not fill the screen was the correct signal.
+Coordinates are assembled high byte first via `CONCAT11`, i.e. **16-bit big-endian**, exactly as
+the ST77xx family specifies.
 
-Interface: **SPI via SSIM0**. Three 4-byte-aligned literal references to `0x50030000` and
-`0x50030060` appear in both the TIGA dump and the vendor Zoom75 image. The hardware LCD
-controller at `0x500D0000` is referenced **nowhere** in either firmware, so the panel is driven
-in software over SPI rather than by the chip's display block.
+**Visible area: 320 × 172, RGB565, landscape.** Confirmed three ways: the resource catalogue
+(§4.5) caps at 320 × 172; the window is set with `thunk_FUN_10014ed8(0, 0x13f, 0, 0xab)`; and each
+framebuffer is cleared with length `0x1AE00` = 320 × 172 × 2 = 110 080 bytes.
 
-> Two method notes, both from mistakes made here. Scanning firmware for peripheral base
-> addresses must use **4-byte alignment** — a 2-byte stride produces false positives inside
-> instruction encodings, and one such false hit was disassembled and turned out to be BLE stack
-> code. And the **absence of `lv_` / `st77` debug strings proves nothing**: the vendor's
-> known-working Zoom75 image contains none either, yet it certainly drives a panel.
+**⚠️ The panel is offset by 34 rows.** `FUN_10014ed8` adds two globals to the window origin:
+`_DAT_11003936` to X and `_DAT_11003938` to Y. Neither is ever written anywhere in the firmware,
+so they were assumed to be zero — **wrong**. Read live from the module with
+`tools/ota_readmem.py 0x11003934 16 --u16`:
+
+```
+11003934  01 01 00 00 22 00 00 00 ...
+  +0x02  0x0000   X offset  = 0
+  +0x04  0x0022   Y offset  = 34
+```
+
+So the underlying die addresses 240 rows and the visible strip of 172 is centred:
+(240 − 172) / 2 = 34. This is an ordinary **1.47" 172×320 ST7789 module used in landscape**,
+not a custom 320 × 172 panel.
+
+**In custom firmware the window must be set as `columns 0..319, rows 34..205`.** Starting rows at
+zero shifts the image up by 34 lines and leaves garbage along the bottom edge.
+
+Other fields in that struct: `+0x00` is the busy flag checked in `FUN_10019f44`; `+0x01` and
+`+0x0C` are set to 1, purpose unknown.
+
+**Pinout on the MCU side**, from `FUN_10014d84` via the GPIO configurator
+`FUN_100151a0(port, {mask, mode, pull, function})`:
+
+| Signal | Pin | Configuration |
+|---|---|---|
+| UART to main board | PA0, PA1 | UART0 |
+| Panel RST | PA2 | output (`mode 0x1001`) |
+| unidentified input | PA3 | input (`mode 0x1000`) — likely TE |
+| Panel DC | PA4 | output |
+| Panel CS | PA5 | output |
+| SPI to panel | PB0, PB2, PB3, PB4, PB5 | alternate function 2 |
+
+Mode encoding: `0x1000` sets the direction bit (input), `0x1001` clears it (output), `2` writes a
+4-bit alternate-function code into the mux register at `bit*4`. Levels are driven by
+`FUN_1001549c(port, mask, level)` writing to `0x50060000 + port*4`.
+
+**Reset sequence:** RST high, delay `0x4B0`, RST low, delay `0x4B0`, RST high — issued after SPI
+and DMA are already up.
+
+**Frame transfer** (`FUN_10019f44`) — the part worth copying:
+
+- Two full framebuffers of 110 080 bytes, `_DAT_110038A0` and `_DAT_110038A4`. They cannot fit in
+  the 56 KB SRAM, so they live in **PSRAM**.
+- A frame goes out as **seven chained DMA descriptors**: source advances 16 000 bytes per block,
+  4000 elements of 4 bytes each, with the last block taking the exact remainder.
+- Destination is `0x50030060`, the SSIM0 data register — the literal that surfaced in the very
+  first peripheral scan.
+- Descriptors are linked (`next = 0x11007500 + i*0x14`), so the whole frame is pushed
+  scatter-gather with no CPU involvement.
+- CS (PA5) is held low for the duration of the transfer.
+- DMA registers are at `0x200200xx`, stride `0x58` per channel, **channel 0**. Enabled in
+  `FUN_10014d34`, which also sets `NVIC_ISER0 = 2` (IRQ 1).
+- `FUN_1001e19c` swaps the buffers after each frame; `FUN_1001e500` is merely the setter for the
+  active framebuffer pointer.
+
+**Blitting** (`FUN_1000a03c`, reconstructed in `research/hplx_blit_reconstructed.c`): spans have
+two encodings selected by the sign bit of `byte_len` — clear means 2 bytes per pixel copied
+straight, set means **3 bytes per pixel with a 5-bit alpha** blended via `FUN_100185b0`.
+
+> ⚠️ Our HPLX decoder in `tools/` only handles the 2-byte literal case. Containers using alpha
+> spans decode incorrectly and we would not notice — the boot animation happens to use literal
+> spans only. See open question 15.
+
+Not needed, and deliberately dropped: mapping the 13-pin FPC to individual signals. The module
+stays intact, so the panel wiring is internal to its board. That only matters if the panel is
+ever detached or replaced.
 
 Still open:
 
-- [ ] Confirm the controller is ST7789 — capture the init sequence with a logic analyser on the
-      FPC, or locate the SSIM0 init routine in the disassembly
-- [ ] Map the 13-pin FPC pinout
-- [ ] Probe which FR8008HP pins reach the Hirose connector
-- [ ] Cross-check by measuring the active area with callipers (~28 × 15 mm expected)
-
-The FPC carries no display markings, so the datasheet route is closed. The logic analyser is the
-shortest path: commands `0x2A` / `0x2B` in the init stream carry the window bounds, which is the
-resolution stated outright.
+- [ ] The one-time ST7789 init sequence (`0x11`, `0x36`, `0x3A`, `0x29`) has not been located.
+      The standard sequence can be used instead and tuned against the live panel.
 
 ### Phase 4. Custom firmware
 
@@ -678,6 +730,12 @@ The graphics stack is already built and configured by the vendor — no need to 
     `2` eeprom). What does it encode, and is the MAC kept there?
 13. Where is the MAC actually stored, given that `0x60000` is erased?
 14. Why does a container's last row sometimes under-report its final span in the row table?
+15. Our HPLX decoder ignores alpha spans (sign bit of `byte_len` set). How many of the 608
+    containers actually use them, and did any of our rendered frames come out wrong?
+16. What is PA3 for? Configured as an input by the display driver — TE is the obvious guess.
+17. Where is the one-time ST7789 init sequence issued from?
+18. What are the `+0x01` and `+0x0C` fields of the display context at `0x11003934`? Both read
+    back as 1 on a running module.
 
 ---
 

@@ -17,3 +17,9 @@ Format: date, decision, rationale, status. Do not delete entries — mark them a
 | 10.09.2026 | Panel treated as 320 × 172 RGB565 landscape | The 608-container resource catalogue caps at exactly 320 wide and 172 tall, with 88 containers at precisely that size; matches a 1.47" 172×320 ST7789 module used in landscape | accepted |
 | 10.09.2026 | Never use Chip Erase, never touch Flash Protect | The MAC is not at `0x60000` and its real location is unknown, so a chip erase may be unrecoverable; the utility's Flash Protect entry *sets* protection rather than reporting it | accepted |
 | 10.09.2026 | Reuse the HPLX container format in custom firmware | Format is fully decoded and trivial to read and write; keeping it means the existing ~8.7 MB of assets stays usable instead of being discarded | preliminary |
+| 10.09.2026 | Panel confirmed as a 1.47" 172×320 ST7789 in landscape | Commands 0x2A/0x2B/0x2C with big-endian coordinates; visible area 320×172; live RAM read shows a 34-row Y offset, i.e. a 172-row strip centred on a 240-row die | accepted |
+| 10.09.2026 | Custom firmware sets the window as columns 0..319, rows 34..205 | The Y offset of 34 is real, not zero as static analysis suggested; starting at row 0 shifts the image and corrupts the bottom edge | accepted |
+| 10.09.2026 | Copy the vendor's frame-transfer architecture | Two PSRAM framebuffers plus chained DMA into the SSIM0 data register is the only workable approach — 110 KB per frame cannot be pushed byte-by-byte from a 96 MHz core | accepted |
+| 10.09.2026 | Drop FPC pinout mapping from the plan | The module stays intact, so the panel wiring is internal to its board. Only relevant if the panel is ever detached or replaced | accepted |
+| 10.09.2026 | Logic analyser no longer needed | Decompilation plus one live RAM read answered controller, geometry, offsets and MCU-side pinout | accepted |
+
