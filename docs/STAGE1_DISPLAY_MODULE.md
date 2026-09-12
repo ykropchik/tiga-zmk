@@ -1,8 +1,12 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.6, updated 12.09.2026 after decoding all 608 resource
-> containers to PNG, which settled how spans and animation runs actually work.
-> Version 1.5 closed phase 3 by decompilation plus a live RAM read. Previous updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
+> Project knowledge base. Version 1.7, updated 12.09.2026 after standing up the Phase 2 build
+> environment and hitting the Keil license wall: unlicensed V5.28 caps a linked image at ~32 KB,
+> confirmed by building `ble_simple_peripheral` unchanged (106 660 bytes, `L6050U`). Resolution
+> deliberately deferred — see open question 20.
+> Version 1.6 decoded all 608 resource containers to PNG, which settled how spans and animation
+> runs actually work. Version 1.5 closed phase 3 by decompilation plus a live RAM read. Previous
+> updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
 
@@ -531,15 +535,33 @@ be reused in stage 2; second, it is insurance — if the custom firmware fails, 
 
 ### Phase 2. Development environment
 
-- [x] **SDK obtained: `fr8000_sdk_V2.1`** (see section 7.1 — contents)
-- [ ] Download: Technical Specification V0.3.19, Reference Manual V1.2.1,
-      Hardware Application Guide V1.4, SDK User Guide V1.0, schematics and footprints V1.1
-- [ ] **Keil V5 version 528** (newer versions do not compile the SDK — confirmed by the vendor)
-      `https://armkeil.blob.core.windows.net/eval/MDK528.EXE`
-- [ ] CMSIS pack `ARM.CMSIS.5.9.0.pack`
-- [ ] Python 3.8+ added to PATH (needed for build scripts)
-- [ ] `FreqChip_Download_New` from `gitee.com/YgqMars/freqchip`
-- [ ] Build the `ble_simple_peripheral` example unchanged and flash it — verify the toolchain
+- [x] **SDK obtained: `fr8000_sdk_V2.1`** (see section 7.1 — contents), local copy in
+      `firmware/display-module/vendor/sdk_V2.1/`
+- [x] Downloaded: `FR800x_Datasheet_v0.3.19.pdf`, `FR800x+Specification+V1.2.1.pdf`,
+      `FR800x+Hardware+Manual_+V1.4.pdf`, `FR8000+SDK+User+Guide+V1.1.pdf` (plan called for V1.0,
+      vendor site now serves V1.1 — newer, not a mismatch), `FR800x_RD_V1.1_20230923/` (schematics
+      and footprints, 9 reference designs). All in `hardware/datasheets/`.
+      ⚠️ The RD folder ships one PDF per die variant (`FR2012B`, `FR2012B-M`, `FR8003A`,
+      `FR8003A-R`, `FR8003D`, `FR8008A`, `FR8008AP`, `FR8008G`, `FR8008XP`) — none named literally
+      `FR8008HP` (the module's marking, §2.1). Not yet resolved which file (if any) actually
+      matches; PDF text is glyph-index encoded and unreadable without `poppler-utils` for
+      rendering. Does not block firmware work, only hardware reference — see open question 19.
+- [x] **Keil V5 version 528 installed**, confirmed via `UV4.exe` file version `5.28.0.0`
+      (newer versions do not compile the SDK — confirmed by the vendor)
+- [x] CMSIS pack `ARM.CMSIS.5.9.0.pack` downloaded (in `vendor/freqchip/`), **not yet registered**
+      in Keil's Pack Installer (only `5.5.1` shows as cached). Did not block compilation in the
+      toolchain check below — this SDK's CMSIS headers are bundled under
+      `components/modules/platform/include/cmsis`, not sourced from the official ARM pack.
+- [x] Python 3.8+ — already present on the machine (3.14.7), no action needed
+- [x] `FreqChip_Download_New` V1.3.9.1 from `gitee.com/YgqMars/freqchip` — in `vendor/freqchip/`
+- [x] Built `ble_simple_peripheral` unchanged via `UV4.exe -b` — **compiled clean, failed at link**:
+      `L6050U: The code size of this image (106660 bytes) exceeds the maximum allowed for this
+      version of the linker.` This is the standard Keil eval/lite cap (~32 KB) — Keil V5.28 here
+      has no commercial license. Since a factory firmware bank is ~154 KB (§4.6), this blocks any
+      non-trivial build, not just this example. **Decision on how to resolve deliberately
+      deferred** — options on the table: buy/obtain a Keil license, or switch this SDK's already
+      -provided GCC build path (`examples/.../gcc/Makefile`, needs `arm-none-eabi-gcc` + `make`,
+      neither installed yet). See open question 20 and the risk table (§6).
 
 ### Phase 3. Panel identification — ✅ DONE (10.09.2026)
 
@@ -651,6 +673,7 @@ an open-source "knob with LVGL display" demo project on this exact chip family.
 
 | Risk | Probability | Consequence | Mitigation |
 |---|---|---|---|
+| Keil V5.28 has no commercial license | **Confirmed, active** | Linker caps the image at ~32 KB (`L6050U`); any real firmware (~154 KB stock) cannot be built as-is | Deliberately deferred (12.09.2026) — candidates: obtain a Keil license, or build via the SDK's own GCC path instead (`arm-none-eabi-gcc` + `make`, not yet installed) |
 | ~~No rollback to stock~~ | **Eliminated** | — | Both banks dumped over BLE in phase 0.5; images in `docs/factory_dump/` |
 | ~~Dump capture fails~~ | **Eliminated** | — | `READ_DATA` is implemented in the factory build |
 | MAC not recoverable after a chip erase | **High** | Module permanently loses its identity | MAC is **not** at `0x60000` (reads `0xFF`) — real location unknown. Never use `CHIP_ERASE`. Known value for reference: `04:75:79:FB:DD:E7` |
@@ -783,6 +806,12 @@ The graphics stack is already built and configured by the vendor — no need to 
 17. Where is the one-time ST7789 init sequence issued from?
 18. What are the `+0x01` and `+0x0C` fields of the display context at `0x11003934`? Both read
     back as 1 on a running module.
+19. Which of the 9 `FR800x_RD_V1.1_20230923` reference-design PDFs (`FR2012B`, `FR2012B-M`,
+    `FR8003A`, `FR8003A-R`, `FR8003D`, `FR8008A`, `FR8008AP`, `FR8008G`, `FR8008XP`) actually
+    matches the module's marked chip, `FR8008HP`? None is named literally `FR8008HP`. Only
+    matters for hardware reference (pin-for-pin schematic check), not for firmware.
+20. How to get past the Keil eval linker's ~32 KB image cap — buy a license, or move the build to
+    the SDK-provided GCC path? **Deliberately deferred, 12.09.2026.** See risk table, §6.
 
 ---
 
@@ -848,3 +877,4 @@ Screen-related parts of the Wuque/Meletrix Google Drive (link in the root README
 | 09.09.2026 | Stage 2 MCU — Raytac MDBT50Q | 48 GPIO vs ~20 on Pro Micro boards; certified; ZMK `nice_nano_v2` as reference |
 | 09.09.2026 | 2.4 GHz deferred | Does not affect board layout, resolved later in software (ZMK dongle over BLE or ESB module) |
 | 09.09.2026 | BLE firmware dump — priority #1 | `OTA_CMD_READ_DATA` found in SDK; factory GATT matches SDK profile byte-for-byte, so reading is available without a soldering iron |
+| 12.09.2026 | Keil license question deliberately deferred | Unlicensed Keil V5.28 caps linked images at ~32 KB, confirmed by building `ble_simple_peripheral` unchanged (106 660 bytes, `L6050U`). Blocks any real firmware build until resolved (license vs. the SDK's own GCC/Makefile path) — no decision made yet |

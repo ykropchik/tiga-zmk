@@ -24,4 +24,5 @@ Format: date, decision, rationale, status. Do not delete entries — mark them a
 | 10.09.2026 | Logic analyser no longer needed | Decompilation plus one live RAM read answered controller, geometry, offsets and MCU-side pinout | accepted |
 | 12.09.2026 | Treat sprite replacement as a first-class way to customise the UI | The interface is assembled from sprites rather than drawn by code, so glyphs, icons and units can be swapped without touching firmware — the cheapest route to a custom look | accepted |
 | 12.09.2026 | Animation vs sprite decided per run, by the first container's coverage | Per-container coverage is unreliable (a digit does not fill its box); the first entry of a size run is full-frame for animations and partial for sprite sets | accepted |
+| 12.09.2026 | Keil license question deliberately deferred | Unlicensed Keil V5.28 caps linked images at ~32 KB, confirmed by building `ble_simple_peripheral` unchanged (106 660 bytes, `L6050U` linker error). Blocks any real firmware build until resolved — candidates are buying a license or switching to the SDK's own GCC/Makefile build path | open |
 
