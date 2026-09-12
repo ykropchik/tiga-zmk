@@ -35,3 +35,10 @@ __pycache__/
 # ОС
 .DS_Store
 Thumbs.db
+
+# vendor resource images — not ours to redistribute, and big
+images/
+*_png/
+hplx_*.bin
+hplx_*.png
+
