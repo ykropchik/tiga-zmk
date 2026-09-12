@@ -54,6 +54,8 @@ dumping the factory module firmware over BLE. Do this before any flash writes.
   framebuffers. RST on PA2, DC on PA4, CS on PA5, SPI on PB0/PB2–PB5.
 - Flash: firmware banks A/B at `0x0` and `0x32000`; `HPLX` resource chain at `0x80000`
   (608 containers, ~8.7 MB); ~6 MB free above `0x929940`.
+- Resources are **sprites, not drawn by code** — glyph sets, units, icons, five animations.
+  All decoded to PNG; the UI can be restyled by replacing images alone.
 - Factory firmware **dumped over BLE**, both banks, byte-identical. Rollback is possible.
 - Main keyboard board: **ArteryTek AT32F415** (LQFP64), 16 MHz crystal, external
   SPI flash, radio on a separate module with a PCB antenna on the main board.

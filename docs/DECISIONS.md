@@ -22,4 +22,6 @@ Format: date, decision, rationale, status. Do not delete entries — mark them a
 | 10.09.2026 | Copy the vendor's frame-transfer architecture | Two PSRAM framebuffers plus chained DMA into the SSIM0 data register is the only workable approach — 110 KB per frame cannot be pushed byte-by-byte from a 96 MHz core | accepted |
 | 10.09.2026 | Drop FPC pinout mapping from the plan | The module stays intact, so the panel wiring is internal to its board. Only relevant if the panel is ever detached or replaced | accepted |
 | 10.09.2026 | Logic analyser no longer needed | Decompilation plus one live RAM read answered controller, geometry, offsets and MCU-side pinout | accepted |
+| 12.09.2026 | Treat sprite replacement as a first-class way to customise the UI | The interface is assembled from sprites rather than drawn by code, so glyphs, icons and units can be swapped without touching firmware — the cheapest route to a custom look | accepted |
+| 12.09.2026 | Animation vs sprite decided per run, by the first container's coverage | Per-container coverage is unreliable (a digit does not fill its box); the first entry of a size run is full-frame for animations and partial for sprite sets | accepted |
 

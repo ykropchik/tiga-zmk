@@ -1,8 +1,8 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.5, updated 10.09.2026 after decompiling the display driver
-> and the protocol dispatcher in Ghidra, and reading live RAM from the module over BLE.
-> Phase 3 is closed. Previous updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
+> Project knowledge base. Version 1.6, updated 12.09.2026 after decoding all 608 resource
+> containers to PNG, which settled how spans and animation runs actually work.
+> Version 1.5 closed phase 3 by decompilation plus a live RAM read. Previous updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
 
@@ -344,13 +344,24 @@ The row table holds `height` entries of `(row_offset, row_size)`, uint32 LE, rel
 `data_offset`. **Each row is a list of spans**, not a raw scanline:
 
 ```
-<x_start : uint32 LE> <byte_len : uint32 LE> <byte_len bytes of RGB565 pixels>
+<x_start : uint32 LE> <byte_len : int32 LE> <pixel data>
 ```
 
-A full row is a single span with `x_start = 0` and `byte_len = width*2`. Delta frames store only
-the spans that changed, so **a frame cannot be decoded in isolation** — composite it onto the
-previous frame, exactly like video. The first frames of each animation run are full; the rest
-are deltas.
+**`byte_len` is signed, and its sign selects the pixel encoding** (`FUN_1000a03c`, `0x1000A1BE`):
+
+| Sign | Bytes per pixel | Meaning |
+|---|---|---|
+| positive | 2 | plain RGB565, copied straight over the destination |
+| negative | 3 | RGB565 + an 8-bit alpha in the third byte, blended with the destination |
+
+For negative values the actual byte count is `byte_len & 0x7FFFFFFF`. The firmware feeds the
+alpha to `FUN_100185b0` after shifting it right by 3, i.e. it blends at 5-bit precision.
+
+**Alpha is the common case, not the exception: 509 of the 608 containers use it.** The Meletrix
+boot animation happens to use only literal spans, which is why an alpha-blind decoder looks
+correct at first and silently corrupts everything else.
+
+A full row is a single span with `x_start = 0` and `byte_len = width*2`.
 
 Practical notes, all learned the hard way:
 
@@ -361,7 +372,29 @@ Practical notes, all learned the hard way:
   and resync forward if it is missing.
 - Pixels are RGB565 little-endian, row-major. No palette, no entropy coding.
 
-Catalogue of the 608 containers (152 runs of consecutive same-size entries). Notable groups:
+### Animation runs versus standalone sprites
+
+Containers group into **152 runs** of consecutive same-size entries, and a run is one of two
+things. Telling them apart matters: treat a sprite set as an animation and every glyph gets
+drawn on top of the previous one.
+
+The discriminator is the **first container of the run**:
+
+- coverage > 90% → the run is an **animation**. The first frame is full, the rest are deltas;
+  composite each onto the previous.
+- coverage below that → the run is a **set of standalone sprites**. Clear the canvas before
+  each one.
+
+Coverage means the fraction of the container's area actually touched by its spans.
+
+By this rule: **5 animation runs totalling 120 frames, and 147 sprite runs totalling 488
+standalone images.** The animations are the Meletrix boot logo (31 frames), a cat (26), a
+120 × 146 widget (41), and two single full-screen frames.
+
+Note that per-container coverage alone is not enough — a digit does not fill its own box, so it
+scores low despite being standalone. The decision has to be made once per run.
+
+Catalogue of the 608 containers. Notable groups:
 
 | Size | Count | What it is |
 |---|---|---|
@@ -376,14 +409,28 @@ Catalogue of the 608 containers (152 runs of consecutive same-size entries). Not
 | 320 × 98, 260 × 60, 238 × 50, 232 × 74 | few each | banners and strips |
 | 10 × 15, 12 × 20, 16 × 26, 8 × 16, 32 × 16 … | groups of 10–16 | **glyph sets — digits 0–9 in several point sizes** |
 
-Runs of exactly ten small same-sized containers are almost certainly digit sets; several
-distinct heights mean several font sizes for different screens.
+### What the library actually contains
 
-**Consequence for custom firmware:** the format is trivial to both read and write. Encoding an
-image into `HPLX` is a few dozen lines of Python, so a custom firmware can either reuse the
-existing container chain as-is or replace it entirely.
+Decoding everything to PNG made the structure obvious. The UI is **assembled from sprites, not
+drawn by code**:
 
-Tooling: `tools/hplx_grab.py` walks the chain and downloads every container, resumably.
+- **Digit sets in several styles and point sizes** — dense white, thin light, grey, cyan, and a
+  slashed-zero variant. Plus separate sprites for `:`, `-`, `.`, `/`, `~` and `%`.
+- **Units as ready-made images**: `°C`, `°F`, `CPU`, `RPM`, `MBPS`, `mbps`.
+- **Icons**: battery in several states, a CPU die, a sun, a toggle switch, the `Aa` layout
+  indicator, frames and divider strips.
+- **Chinese page headings** 风格 ("Style") and 数据 ("Data") — menu pages. The duplicate glyph
+  sets in different colours are the themes that page switches between.
+- **Animations**: the Meletrix logo, a cat, a white dog, a lion cub, orange rays.
+
+**Consequence, and it is a useful one:** because the interface is sprite-based, its appearance
+can be changed by replacing images alone — no custom firmware needed. Swap the glyphs and the
+digits on screen change; swap the icons and the indicators change. Encoding a PNG back into
+`HPLX` is the exact inverse of the decoder and is a few dozen lines of Python.
+
+Tooling: `tools/hplx_grab.py` walks the chain and downloads every container, resumably;
+`tools/hplx_decode.py` converts a directory of containers to PNG, handling both span encodings
+and both run types, and emits RGBA so alpha survives.
 
 ### 4.6 Flash map (16 MB, probed at 64 KB steps)
 
@@ -730,8 +777,8 @@ The graphics stack is already built and configured by the vendor — no need to 
     `2` eeprom). What does it encode, and is the MAC kept there?
 13. Where is the MAC actually stored, given that `0x60000` is erased?
 14. Why does a container's last row sometimes under-report its final span in the row table?
-15. Our HPLX decoder ignores alpha spans (sign bit of `byte_len` set). How many of the 608
-    containers actually use them, and did any of our rendered frames come out wrong?
+15. ~~How many containers use alpha spans?~~ → **closed, 12.09.2026: 509 of 608.** The decoder
+    now handles both encodings; see §4.5
 16. What is PA3 for? Configured as an input by the display driver — TE is the obvious guess.
 17. Where is the one-time ST7789 init sequence issued from?
 18. What are the `+0x01` and `+0x0C` fields of the display context at `0x11003934`? Both read
