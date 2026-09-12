@@ -1,12 +1,14 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.7, updated 12.09.2026 after standing up the Phase 2 build
-> environment and hitting the Keil license wall: unlicensed V5.28 caps a linked image at ~32 KB,
-> confirmed by building `ble_simple_peripheral` unchanged (106 660 bytes, `L6050U`). Resolution
-> deliberately deferred — see open question 20.
-> Version 1.6 decoded all 608 resource containers to PNG, which settled how spans and animation
-> runs actually work. Version 1.5 closed phase 3 by decompilation plus a live RAM read. Previous
-> updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
+> Project knowledge base. Version 1.8, updated 12.09.2026 — Phase 2 closed. The Keil eval linker's
+> ~32 KB cap (hit while building `ble_simple_peripheral` unchanged, `L6050U`) is bypassed by
+> building through the SDK's own GCC/Makefile path instead: `arm-none-eabi-gcc` + GnuWin32 Make +
+> Git Bash's `sh`/`rm`, full-size image (154 728 bytes), no license needed. Keil is no longer
+> required to build this SDK.
+> Version 1.7 stood up the Phase 2 build environment and hit that Keil license wall in the first
+> place. Version 1.6 decoded all 608 resource containers to PNG, which settled how spans and
+> animation runs actually work. Version 1.5 closed phase 3 by decompilation plus a live RAM read.
+> Previous updates: 1.4 phase 0.5, 1.3 phase 0, 1.2 SDK and gitee material.
 > Keep in the repository at `tiga-zmk/docs/`. Update as new facts are established.
 > Rule: **fact** — something verified; **hypothesis** — something derived by reasoning. Do not mix them.
 
@@ -557,11 +559,24 @@ be reused in stage 2; second, it is insurance — if the custom firmware fails, 
 - [x] Built `ble_simple_peripheral` unchanged via `UV4.exe -b` — **compiled clean, failed at link**:
       `L6050U: The code size of this image (106660 bytes) exceeds the maximum allowed for this
       version of the linker.` This is the standard Keil eval/lite cap (~32 KB) — Keil V5.28 here
-      has no commercial license. Since a factory firmware bank is ~154 KB (§4.6), this blocks any
-      non-trivial build, not just this example. **Decision on how to resolve deliberately
-      deferred** — options on the table: buy/obtain a Keil license, or switch this SDK's already
-      -provided GCC build path (`examples/.../gcc/Makefile`, needs `arm-none-eabi-gcc` + `make`,
-      neither installed yet). See open question 20 and the risk table (§6).
+      has no commercial license. Since a factory firmware bank is ~154 KB (§4.6), this blocked any
+      non-trivial build, not just this example.
+- [x] **Resolved, 12.09.2026 — toolchain switched to GCC, Keil license question closed.**
+      Installed `arm-none-eabi-gcc` 15.3.1 (`D:\Program Files\Arm\GNU Toolchain
+      mingw-w64-x86_64-arm-none-eabi\bin`) and GnuWin32 Make 3.81
+      (`D:\Program Files (x86)\GnuWin32\bin`). Built the same `ble_simple_peripheral` unchanged via
+      the SDK's own `examples/.../gcc/Makefile` — **succeeded end to end**, no size cap:
+      `fr8000_project.bin` is 154 728 bytes (`text 144188, data 2448, bss 6244`), in the same range
+      as a real factory firmware bank (§4.6). Only linker warnings, no errors — unimplemented
+      newlib syscall stubs (`_close`/`_fstat`/`_isatty`/`_lseek`/`_read`, unused by this example)
+      and "Forcing branch to absolute symbol" from the prebuilt `libfr800x_stack.a` (normal for a
+      vendor-supplied `.a` linked into Thumb code).
+      GnuWin32 Make has no `sh`/`rm` of its own — the Makefile's `$(shell mkdir ...)` and
+      `make clean`'s `rm -rf` both need a real POSIX shell on PATH, supplied here by Git Bash's
+      `C:\Program Files\Git\usr\bin`. Without it, `Objects/` never gets created and the first
+      compile fails with "No such file or directory".
+      **Keil is no longer required to build this SDK** — GCC is the toolchain going forward. CMSIS
+      pack registration in Keil (open above) is moot for the same reason.
 
 ### Phase 3. Panel identification — ✅ DONE (10.09.2026)
 
@@ -673,7 +688,7 @@ an open-source "knob with LVGL display" demo project on this exact chip family.
 
 | Risk | Probability | Consequence | Mitigation |
 |---|---|---|---|
-| Keil V5.28 has no commercial license | **Confirmed, active** | Linker caps the image at ~32 KB (`L6050U`); any real firmware (~154 KB stock) cannot be built as-is | Deliberately deferred (12.09.2026) — candidates: obtain a Keil license, or build via the SDK's own GCC path instead (`arm-none-eabi-gcc` + `make`, not yet installed) |
+| ~~Keil V5.28 has no commercial license~~ | **Eliminated** | — | Switched the build to the SDK's own GCC/Makefile path (`arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's `sh`/`rm`); `ble_simple_peripheral` now builds full-size (154 728 bytes), no cap. Keil is no longer needed to build this SDK |
 | ~~No rollback to stock~~ | **Eliminated** | — | Both banks dumped over BLE in phase 0.5; images in `docs/factory_dump/` |
 | ~~Dump capture fails~~ | **Eliminated** | — | `READ_DATA` is implemented in the factory build |
 | MAC not recoverable after a chip erase | **High** | Module permanently loses its identity | MAC is **not** at `0x60000` (reads `0xFF`) — real location unknown. Never use `CHIP_ERASE`. Known value for reference: `04:75:79:FB:DD:E7` |
@@ -810,8 +825,9 @@ The graphics stack is already built and configured by the vendor — no need to 
     `FR8003A`, `FR8003A-R`, `FR8003D`, `FR8008A`, `FR8008AP`, `FR8008G`, `FR8008XP`) actually
     matches the module's marked chip, `FR8008HP`? None is named literally `FR8008HP`. Only
     matters for hardware reference (pin-for-pin schematic check), not for firmware.
-20. How to get past the Keil eval linker's ~32 KB image cap — buy a license, or move the build to
-    the SDK-provided GCC path? **Deliberately deferred, 12.09.2026.** See risk table, §6.
+20. ~~How to get past the Keil eval linker's ~32 KB image cap?~~ → **closed, 12.09.2026:** moved
+    the build to the SDK's own GCC path (`arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's
+    `sh`/`rm`) — `ble_simple_peripheral` now builds full-size, no license needed. See §6.
 
 ---
 
@@ -877,4 +893,4 @@ Screen-related parts of the Wuque/Meletrix Google Drive (link in the root README
 | 09.09.2026 | Stage 2 MCU — Raytac MDBT50Q | 48 GPIO vs ~20 on Pro Micro boards; certified; ZMK `nice_nano_v2` as reference |
 | 09.09.2026 | 2.4 GHz deferred | Does not affect board layout, resolved later in software (ZMK dongle over BLE or ESB module) |
 | 09.09.2026 | BLE firmware dump — priority #1 | `OTA_CMD_READ_DATA` found in SDK; factory GATT matches SDK profile byte-for-byte, so reading is available without a soldering iron |
-| 12.09.2026 | Keil license question deliberately deferred | Unlicensed Keil V5.28 caps linked images at ~32 KB, confirmed by building `ble_simple_peripheral` unchanged (106 660 bytes, `L6050U`). Blocks any real firmware build until resolved (license vs. the SDK's own GCC/Makefile path) — no decision made yet |
+| 12.09.2026 | Build firmware with the SDK's GCC/Makefile path, not Keil | Unlicensed Keil V5.28 caps linked images at ~32 KB (`L6050U`, hit building `ble_simple_peripheral` unchanged, 106 660 bytes). Installed `arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's `sh`/`rm`; the same example then built full-size (154 728 bytes) with no license. Keil is no longer needed to build this SDK |
