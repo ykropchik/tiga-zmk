@@ -1,10 +1,14 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.9, updated 12.09.2026 — verified the GCC-built image's
-> `jump_table_t` header against the factory dump byte-for-byte: magic, size accounting and the
-> `--gc-sections` question are all resolved (§Phase 2 addendum), and the build is confirmed
-> toolchain-only, not flash-ready (`firmware_version=0`, undersized `image_size`, missing CRC
-> signing step — see open question 21).
+> Project knowledge base. Version 1.10, updated 13.09.2026 — checked the vendor material against
+> two open questions: `HPLX` is confirmed absent from all official docs and SDK source (proprietary
+> to the app, not a FreqChip format, §4.5), and the SDK's real flash read/write API was traced from
+> `driver_flash.h` through `ota.c`, showing `OTA_CMD_WRITE_DATA` has no address-range guard at all —
+> the source-level confirmation behind the BLE-OTA safety rule (§ Official flash read/write API).
+> Version 1.9 verified the GCC-built image's `jump_table_t` header against the factory dump
+> byte-for-byte: magic, size accounting and the `--gc-sections` question are all resolved
+> (§Phase 2 addendum), and the build is confirmed toolchain-only, not flash-ready
+> (`firmware_version=0`, undersized `image_size`, missing CRC signing step — see open question 21).
 > Version 1.8 closed Phase 2: the Keil eval linker's ~32 KB cap (hit while building
 > `ble_simple_peripheral` unchanged, `L6050U`) is bypassed by building through the SDK's own
 > GCC/Makefile path instead: `arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's `sh`/`rm`, full-size
@@ -441,6 +445,81 @@ digits on screen change; swap the icons and the indicators change. Encoding a PN
 Tooling: `tools/hplx_grab.py` walks the chain and downloads every container, resumably;
 `tools/hplx_decode.py` converts a directory of containers to PNG, handling both span encodings
 and both run types, and emits RGBA so alpha survives.
+
+### Official flash read/write API — checked, 13.09.2026
+
+Looked for how FreqChip itself documents/exposes flash access, at three levels:
+
+- **Register level (`FR800x Specification v1.2.1`):** the built-in flash appears **only in the
+  memory map** (§1.3, `1.1000_0000–0x1100_DFFF`, "Flash supports up to 16M bytes", cacheable/XIP)
+  and as a `QSPI1`/`QSPI0` peripheral base address. There is **no dedicated flash-controller
+  register chapter** — no erase/program bitfields, no command opcodes documented at the hardware
+  level. Flash access is fully abstracted behind the SDK driver, not meant to be bit-banged.
+- **Narrative level (`FR8000 SDK User Guide v1.1`, §1.2–1.3):** describes the A/B dual-bank OTA
+  layout (matches what `升级协议文档.pdf` and §4.3 already established) and the boot process
+  (`app_boot` → `__jump_table` → `app_entry`). No generic "how to read/write flash" tutorial.
+- **Driver level (`components/driver/include/driver_flash.h`) — the actual official API:**
+  a full generic driver, present in the SDK though not narrated in any PDF:
+  `flash_read(offset, length, buffer)`, `flash_write(offset, length, buffer)`,
+  `flash_erase(offset, size)`, `flash_chip_erase(void)`, plus mode selectors
+  (`flash_set_read_quad/dual/single`, `flash_init(rd_type, wr_type)`) and real JEDEC opcodes
+  (`FLASH_PAGE_PROGRAM_OPCODE 0x02`, `FLASH_SECTORE_ERASE_OPCODE 0x20`,
+  `FLASH_BLOCK_64K_ERASE_OPCODE 0xD8`, `FLASH_CHIP_ERASE_OPCODE 0x60`,
+  `FLASH_READ_IDENTIFICATION 0x9F`). Also a small, separately-addressed **OTP/security section**:
+  `flash_OTP_read/write/erase(offset, length, buffer)`, fixed 512-byte regions at offsets
+  `0x1000`/`0x2000`/`0x3000` only (`driver_flash.h:100-111`) — **a new, unexplored lead for open
+  question 13** (where the MAC actually lives, since `0x60000` reads `0xFF`): this OTP area has
+  never been probed on the module.
+
+**Confirmed by reading `components/ble/profiles/ble_ota/ota.c`: the BLE OTA opcodes are a thin
+wrapper directly over this driver**, closing the loop between §4.3's wire opcodes and the
+underlying flash API:
+
+- `OTA_CMD_WRITE_DATA` (`0x05`) → `app_otas_save_data()` (`ota.c:126`) → `flash_write(dest, len, src)`
+  (`ota.c:112`) — **no address-range check anywhere in this path.** The only conditional guard
+  (`ota.c:349-360`) is compiled out unless `OTA_CRC_CHECK` is defined, and even then it only checks
+  that writes are *sequential*, not that the address is safe.
+- `OTA_CMD_READ_DATA` (`0x06`) → `app_boot_load_data()` → `flash_read()`.
+- `OTA_CMD_PAGE_ERASE` (`0x03`) → `app_otas_erase()` → `flash_erase(dest, 0x1000)` — **this one
+  is guarded** (`ota.c:328-341`): it refuses (and force-disconnects) if the target address is below
+  `app_otas_get_storage_address()` (the bank-B OTA target, same value opcode `0x01` returns).
+
+**This is the concrete, source-level confirmation behind the CLAUDE.md safety rule** ("BLE OTA...
+can [damage firmware]"): erase is guarded in the stock SDK, **write is not**. Any client (including
+our own tooling) must enforce the `≥ 0x80000` address floor itself — the module will not stop it.
+It also means the UART protocol's own address check (§ below, "`0x02` refuses target addresses
+below `0x80000`") is an addition **Meletrix made themselves** on top of stock SDK behaviour, not
+something inherited for free from the OTA profile.
+
+### HPLX is not a vendor-documented format — checked, 13.09.2026
+
+Searched for any official description of the `HPLX` container (magic, row table, signed
+`byte_len` span encoding) or a matching loading procedure, across everything FreqChip ships:
+
+- `FR800x Specification v1.2.1` (284 pages, full text extracted with `pdftotext`), the
+  `FR8000 SDK User Guide v1.1`, `FR800x Hardware Manual v1.4`, `FR800x_Datasheet_v0.3.19` — no
+  hit for `HPLX`, no chapter on an image/sprite/resource container format. Chapter 15 ("LCD")
+  and the SPI (`SPIM0`, base `0x5003_0000` — confirms the SSIM0 literal from §4.5/Phase 3) and
+  DMA-scatter-gather chapters document the **transport** (how pixels reach the panel), never
+  a **storage** format for images at rest in flash.
+- Full-text grep of `fr8000_sdk_V2.1` for `HPLX`: no match anywhere in source, headers or docs.
+- The SDK does bundle its own image-drawing code, `components/modules/gui_lib/source/gui_bmp.c`
+  (`rtl_gui_show_bmp_simple/_sector/_background`) — but it is Realtek-authored (copyright header,
+  `rtl876x.h`, `wristband_gui.h` naming), not FreqChip's own, and not mentioned anywhere in the
+  SDK User Guide text. Its format is unrelated to HPLX: a fixed `width×height` raw RGB565/RGB888
+  raster with **no magic, no row table, no per-row spans**; transparency is a plain colour-key
+  (pixel value `0` skipped), not a per-pixel alpha byte. `UI_BMPTypeDef` (`gui_core.h:68-77`) is
+  just `{x, y, active_ys, active_ye, width, height, addr}` pointing straight at a raw bitmap.
+- LVGL (also bundled, stock upstream) has its own separate `lv_img_dsc_t`/`lv_img_header_t`
+  format — likewise unrelated.
+
+**Conclusion (fact): HPLX is proprietary to the actual application firmware on this module —
+built by Meletrix/Wuque (or whoever assembled the resource chain) on top of the FR8000 SDK, not
+a FreqChip-documented or FreqChip-supplied container format.** Nothing in the vendor material
+describes it or how to load it; everything known about HPLX (§4.5, `research/hplx_blit_reconstructed.c`)
+comes from decompilation and RAM reads of the factory image, not from any datasheet. This does
+not block reuse in custom firmware (§ decision "Reuse the HPLX container format", `DECISIONS.md`)
+— it only means there is no vendor reference to check the reverse-engineered structure against.
 
 ### 4.6 Flash map (16 MB, probed at 64 KB steps)
 
@@ -886,7 +965,10 @@ The graphics stack is already built and configured by the vendor — no need to 
     exist? → phase 1, needs the module talking to the main board
 12. `NVDS_TYPE` returns `0x11`, which is not a value in the SDK enum (`0` none / `1` flash /
     `2` eeprom). What does it encode, and is the MAC kept there?
-13. Where is the MAC actually stored, given that `0x60000` is erased?
+13. Where is the MAC actually stored, given that `0x60000` is erased? **New lead, 13.09.2026:**
+    the SDK's `driver_flash.h` exposes a separate small OTP/security-register API
+    (`flash_OTP_read`, offsets `0x1000`/`0x2000`/`0x3000`, 512 bytes each) distinct from the main
+    flash address space — never probed on this module. Untested hypothesis, not a fact yet.
 14. Why does a container's last row sometimes under-report its final span in the row table?
 15. ~~How many containers use alpha spans?~~ → **closed, 12.09.2026: 509 of 608.** The decoder
     now handles both encodings; see §4.5
