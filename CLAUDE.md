@@ -56,8 +56,11 @@ These come up in almost every task. Everything else, look up.
 - Do not touch the stock keyboard PCB. It is the continuity reference and the fallback path.
 - Custom module firmware must carry a version **above 1**, or the boot loader will not select
   it. Factory version is 1 in both banks.
-- The `0x02` transfer command refuses target addresses below `0x80000`, so the wire path
-  cannot damage the firmware banks. BLE OTA and the boot ROM can.
+- The `0x02` UART transfer command refuses target addresses below `0x80000`, so the wire path
+  cannot damage the firmware banks. The boot ROM can.
+- BLE OTA `WRITE_DATA` only accepts the storage base (`0x32000`) or a contiguous continuation of
+  the previous write — anything else is dropped silently, with no response. It is a
+  firmware-flashing channel, not a general-purpose flash writer.
 
 ## How to work with me
 
