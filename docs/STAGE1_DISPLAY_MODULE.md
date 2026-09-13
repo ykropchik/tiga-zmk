@@ -1,10 +1,18 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.10, updated 13.09.2026 — checked the vendor material against
-> two open questions: `HPLX` is confirmed absent from all official docs and SDK source (proprietary
-> to the app, not a FreqChip format, §4.5), and the SDK's real flash read/write API was traced from
-> `driver_flash.h` through `ota.c`, showing `OTA_CMD_WRITE_DATA` has no address-range guard at all —
-> the source-level confirmation behind the BLE-OTA safety rule (§ Official flash read/write API).
+> Project knowledge base. Version 1.11, updated 13.09.2026 — built `tools/ota_write_test.py` and
+> tested the BLE OTA write path live against a safe address deep in the confirmed-empty flash tail:
+> `PAGE_ERASE`/`READ_DATA` work exactly as predicted, but `OTA_CMD_WRITE_DATA` does not — no
+> notification arrives under either GATT write mode, and a full-page read-back after the timeout
+> confirms nothing was actually written (not a lost acknowledgement). An `OTA_CRC_CHECK`
+> address-continuity guard was raised as a possible explanation but is neither confirmed nor ruled
+> out — both factory dumps contain zero printable strings, so static comparison against the SDK is
+> inconclusive, and testing it live is unsafe (§ `OTA_CMD_WRITE_DATA` does not work on this module).
+> Version 1.10 checked the vendor material against two open questions: `HPLX` is confirmed absent
+> from all official docs and SDK source (proprietary to the app, not a FreqChip format, §4.5), and
+> the SDK's real flash read/write API was traced from `driver_flash.h` through `ota.c`, showing
+> `OTA_CMD_WRITE_DATA` has no address-range guard at all in the stock SDK — the source-level
+> confirmation behind the BLE-OTA safety rule (§ Official flash read/write API).
 > Version 1.9 verified the GCC-built image's `jump_table_t` header against the factory dump
 > byte-for-byte: magic, size accounting and the `--gc-sections` question are all resolved
 > (§Phase 2 addendum), and the build is confirmed toolchain-only, not flash-ready
@@ -490,6 +498,43 @@ our own tooling) must enforce the `≥ 0x80000` address floor itself — the mod
 It also means the UART protocol's own address check (§ below, "`0x02` refuses target addresses
 below `0x80000`") is an addition **Meletrix made themselves** on top of stock SDK behaviour, not
 something inherited for free from the OTA profile.
+
+### `OTA_CMD_WRITE_DATA` does not work on this module — tested live, 13.09.2026
+
+Built `tools/ota_write_test.py` to validate the write path predicted above (erase → write → read
+back → erase again), targeting `0xC00000` — deep inside the confirmed-empty tail (§4.6), 4 KB-
+aligned, read back in full before touching anything.
+
+**Result: `PAGE_ERASE` and `READ_DATA` both work exactly as the stock `ota.c` predicts. `WRITE_DATA`
+does not — no notification arrives, tried both as a BLE Write Command (`response=False`) and a
+Write Request (`response=True`).** The device stays fully responsive throughout: the second
+`PAGE_ERASE`, issued immediately after the failed write, succeeded normally — ruling out a firmware
+hang or crash.
+
+A hypothesis was raised that the stock `ota.c`'s `OTA_CRC_CHECK`-gated address-continuity guard
+(`ota.c:349-360`, disabled by `//#define` in the SDK we have, §above) might be enabled in Meletrix's
+actual build, silently rejecting any `base_address` that isn't exactly the bank-B storage address
+or a continuation of it — which would explain a silent, response-less refusal. **Checked against
+`docs/factory_dump/` and found inconclusive, not confirmatory:** neither bank contains a single
+printable string ≥6 characters (`strings -n 6`) — not even ones that would be unconditionally
+present regardless of `OTA_CRC_CHECK` (e.g. the `app_otas_recv_data` debug format string). All
+`co_printf` output appears stripped from this release build entirely, so the absence of the
+guard's specific strings proves nothing either way. **Treat this hypothesis as neither confirmed
+nor ruled out** — testing it live is not an option either: the only `base_address` that would ever
+satisfy such a guard on a fresh connection (before any `GET_STR_BASE` call primes it) is `0x0`
+itself, inside the live firmware bank, which is not something to try.
+
+**One alternative was ruled out directly, empirically:** "the write silently succeeds but only the
+acknowledgement is lost." The test script now reads the full page back immediately after any
+`WRITE_DATA` timeout, acked or not. Result: the target region was still all `0xFF` and the rest of
+the page was untouched — nothing was written. So this is a **write failure**, not a **notification**
+failure.
+
+**Net effect for stage 2 planning:** the BLE OTA `WRITE_DATA` path, while present and unguarded by
+address in the public SDK, does not actually work on the real module as shipped — for reasons still
+unknown. The UART `0x02`/`0x03` push mechanism (`docs/UART_PROTOCOL.md`) remains untested live and
+is a structurally different code path (Meletrix's own protocol, not the stock `ota.c` switch), so
+this finding does not extend to it one way or the other.
 
 ### HPLX is not a vendor-documented format — checked, 13.09.2026
 
