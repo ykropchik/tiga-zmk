@@ -1,10 +1,14 @@
 # Stage 1 — Custom firmware for the Meletrix Zoom75 TIGA display module
 
-> Project knowledge base. Version 1.8, updated 12.09.2026 — Phase 2 closed. The Keil eval linker's
-> ~32 KB cap (hit while building `ble_simple_peripheral` unchanged, `L6050U`) is bypassed by
-> building through the SDK's own GCC/Makefile path instead: `arm-none-eabi-gcc` + GnuWin32 Make +
-> Git Bash's `sh`/`rm`, full-size image (154 728 bytes), no license needed. Keil is no longer
-> required to build this SDK.
+> Project knowledge base. Version 1.9, updated 12.09.2026 — verified the GCC-built image's
+> `jump_table_t` header against the factory dump byte-for-byte: magic, size accounting and the
+> `--gc-sections` question are all resolved (§Phase 2 addendum), and the build is confirmed
+> toolchain-only, not flash-ready (`firmware_version=0`, undersized `image_size`, missing CRC
+> signing step — see open question 21).
+> Version 1.8 closed Phase 2: the Keil eval linker's ~32 KB cap (hit while building
+> `ble_simple_peripheral` unchanged, `L6050U`) is bypassed by building through the SDK's own
+> GCC/Makefile path instead: `arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's `sh`/`rm`, full-size
+> image (154 728 bytes), no license needed. Keil is no longer required to build this SDK.
 > Version 1.7 stood up the Phase 2 build environment and hit that Keil license wall in the first
 > place. Version 1.6 decoded all 608 resource containers to PNG, which settled how spans and
 > animation runs actually work. Version 1.5 closed phase 3 by decompilation plus a live RAM read.
@@ -578,6 +582,75 @@ be reused in stage 2; second, it is insurance — if the custom firmware fails, 
       **Keil is no longer required to build this SDK** — GCC is the toolchain going forward. CMSIS
       pack registration in Keil (open above) is moot for the same reason.
 
+#### Phase 2 addendum — GCC image structure verified against the factory dump (12.09.2026)
+
+Compared the first 64 bytes of `fr8000_project.bin` (our GCC build) against
+`docs/factory_dump/dump_0x0_0x32000.bin`. The `33 33 33 33` magic at +0x08 is present in our
+build and lines up byte-for-byte with the factory header's field layout.
+
+**The header is not appended by any flashing tool — it is compiled in**, as
+`struct jump_table_t` (`components/modules/platform/include/jump_table.h:191-245`), assembled by
+the linker from **two different sources**, confirmed by `fr8000_project.map:3853-3868` and
+`objdump -h`:
+
+| Field(s) | Flash offset | Comes from |
+|---|---|---|
+| `reserved_data` | +0x00 | `libfr800x_stack.a(jump_table_host.o)` — vendor blob, **not our code** |
+| `image_size`, `image_type` | +0x04 | `examples/.../code/proj_main.c:46-50` (`_jump_table_image`) |
+| `entry`, `memory_init_app` | +0x0C | vendor blob |
+| `stack_top_address`, `firmware_version` | +0x14 | `proj_main.c:40-44` (`_jump_table_version`) |
+| everything after (`system_option`, sleep timings, etc., 0x48 bytes) | +0x1C | vendor blob |
+
+This explains why fields like `system_option` (+0x2C) and the sleep-timing constants are
+byte-identical between our unmodified example and the real factory dump — they come from the
+same precompiled `libfr800x_stack.a`, shared by every project built on this SDK, not recomputed
+per project.
+
+Two fields differ from the factory image, both traced to `proj_main.c`'s unmodified example
+defaults, **not bugs in the build**:
+
+- `firmware_version` (+0x18): factory = `1`, ours = `0` — set literally as
+  `.firmware_version = 0x00000000` at `proj_main.c:43`. Per the hardware safety rule (CLAUDE.md),
+  a real custom image must set this above 1 or the boot loader won't select it.
+- `image_size` (+0x04): factory = `0x30000` (matches the bank boundary at `0x32000`, §4.3), ours =
+  `0x20000` — set as `.image_size = 0x20000` at `proj_main.c:49`, a template placeholder. Our
+  actual compiled `.bin` (154 728 bytes) is **larger** than this self-declared value (131 072) —
+  harmless for a toolchain smoke test, but this field must be raised to match reality (with
+  headroom) before it means anything for real OTA bank math.
+
+**Open gap, not yet resolved:** `jump_table.h:247-260` carries (Chinese-language) comments stating
+that `jump_table_crc` and `image_crc` — a *separate* struct, `image_crc_t`, appended after
+`jump_table_t` — are computed by an external script run after the Keil build finishes, not by the
+compiler. No such script was found anywhere in `sdk_V2.1` or `vendor/freqchip`, and the example's
+own Keil project only runs `fromelf` in its post-build steps (`ble_simple_peripheral.uvproj:81-86`)
+— no CRC patching. **Neither our GCC build nor a vanilla Keil build of this example produces a
+CRC-signed image.** Whether the boot loader requires this stamp to accept an image is unconfirmed
+— see open question 21.
+
+**Size accounting**, verified with `objdump -h` (not inferred): `.jump_table` ends at flash offset
+`0x64`; the linker script aligns `.text` to the next `0x2000` boundary
+(`components/toolchain/gcc/ldscript.ld:50`), so `0x1F9C` (8092) zero-filled bytes sit between them
+— this, not `--gc-sections` dropping anything, accounts for the gap between `size`'s
+`text+data` (146 636) and the actual `.bin` (154 728). All `jump_table_0`–`4` sections carry
+`KEEP()` (`ldscript.ld:34-38`) specifically to survive `--gc-sections`; the link produced zero
+"undefined reference" errors, meaning every one of the ~102 vendor-library symbols pulled in
+resolved cleanly. Minor, unrelated inefficiency spotted in passing: `stack_section` (the 2 KB
+`system_stack` array) has no dedicated `NOLOAD` rule in the linker script, so it physically
+occupies 2 KB of the `.bin` as zero padding instead of living only in `.bss` — free to reclaim in
+a real build, not fixed here.
+
+**Warning survey**, full clean `make clean && make` log (1468 lines, zero errors, zero warnings
+from our own 6 source files): all 1443 warning lines fall into exactly three buckets —
+1437 "Forcing branch to absolute symbol in Thumb mode" across 102 distinct vendor-library symbols
+(`jump_table.h:284-293` declares the BLE stack's entry points as function-pointer externs assigned
+absolute addresses, not ordinary relocatable symbols — GCC 15.3's linker is simply more vocal
+about this than whatever shipped with the SDK originally; the link still resolved every one of
+them, no missing symbols), one "LOAD segment with RWX permissions" (routine for a bare-metal
+linker script with no ELF segment-permission split), and 5 unimplemented-newlib-syscall notices
+(`_close`/`_fstat`/`_isatty`/`_lseek`/`_read` — unused by this example; `_write` is retargeted
+elsewhere, since it's absent from the list). None of the three categories looks like a real
+toolchain-version regression.
+
 ### Phase 3. Panel identification — ✅ DONE (10.09.2026)
 
 Answered entirely by decompilation in Ghidra plus one live RAM read. No logic analyser needed.
@@ -828,6 +901,11 @@ The graphics stack is already built and configured by the vendor — no need to 
 20. ~~How to get past the Keil eval linker's ~32 KB image cap?~~ → **closed, 12.09.2026:** moved
     the build to the SDK's own GCC path (`arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's
     `sh`/`rm`) — `ble_simple_peripheral` now builds full-size, no license needed. See §6.
+21. Does the boot loader require a signed `jump_table_crc`/`image_crc` (`jump_table.h:247-260`) to
+    accept an image, or does it only check `firmware_version` for bank selection? No CRC-patching
+    script was found anywhere in `sdk_V2.1` or `vendor/freqchip`, and neither our GCC build nor a
+    vanilla Keil build of the example produces one. Matters before any real image is written to
+    the module — see the Phase 2 addendum above.
 
 ---
 
@@ -894,3 +972,4 @@ Screen-related parts of the Wuque/Meletrix Google Drive (link in the root README
 | 09.09.2026 | 2.4 GHz deferred | Does not affect board layout, resolved later in software (ZMK dongle over BLE or ESB module) |
 | 09.09.2026 | BLE firmware dump — priority #1 | `OTA_CMD_READ_DATA` found in SDK; factory GATT matches SDK profile byte-for-byte, so reading is available without a soldering iron |
 | 12.09.2026 | Build firmware with the SDK's GCC/Makefile path, not Keil | Unlicensed Keil V5.28 caps linked images at ~32 KB (`L6050U`, hit building `ble_simple_peripheral` unchanged, 106 660 bytes). Installed `arm-none-eabi-gcc` + GnuWin32 Make + Git Bash's `sh`/`rm`; the same example then built full-size (154 728 bytes) with no license. Keil is no longer needed to build this SDK |
+| 12.09.2026 | GCC-built images are toolchain smoke-tests only, not yet flash-ready | `firmware_version=0` and `image_size=0x20000` in the built header are unmodified example placeholders (`proj_main.c`), and no CRC-signing step (referenced in `jump_table.h` comments) was found anywhere in the SDK checkout. All three must be addressed with real values/tooling before any image derived from this SDK is written to the module |
